@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache-dependency-path: |
+            package-lock.json
+            obsidian-plugin/package-lock.json
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Install Obsidian companion dependencies
+        run: npm --prefix obsidian-plugin ci
+
+      - name: Audit all dependencies
+        run: |
+          npm audit
+          npm --prefix obsidian-plugin audit
+
+      - name: Check formatting and lint
+        run: npm run lint:check
+
+      - name: Build plugin and type-check
+        run: npm run build
+
+      - name: Build Obsidian companion
+        run: npm run build:obsidian
+
+      - name: Run annotation and note integration scenarios
+        run: npm run smoke:integration
+
+      - name: Run focused regression suites
+        run: |
+          npm run test:native-note
+          npm run test:companion-protocol
+          npm run test:image-resource
+          npm run test:auto-enrollment
+          npm run test:diagnostics
+          npm run test:companion-safety
+          npm run test:companion-ownership
+          npm run test:companion-r3
+          npm run test:release-config
+          npm run test:r6-stress
+
+      - name: Audit and stage paired packages
+        run: |
+          npm run verify:package
+          npm run prepare:release
+
+      - name: Check patch whitespace
+        run: git diff --check
+
+      - name: Upload reviewable package
+        uses: actions/upload-artifact@v4
+        with:
+          name: zotero-obsidian-bridge-${{ github.sha }}
+          path: |
+            .scaffold/release/*.xpi
+            .scaffold/release/*.zip
+            .scaffold/release/*.sha256
+          if-no-files-found: error
+          retention-days: 14

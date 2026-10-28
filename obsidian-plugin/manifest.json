@@ -1,0 +1,9 @@
+{
+  "id": "zotero-card-bridge",
+  "name": "Zotero Obsidian Bridge",
+  "version": "0.1.0",
+  "minAppVersion": "1.6.0",
+  "description": "Applies Zotero Bridge Markdown requests through the Obsidian Vault API.",
+  "author": "Personal project",
+  "isDesktopOnly": true
+}

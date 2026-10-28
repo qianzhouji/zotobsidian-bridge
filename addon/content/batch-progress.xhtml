@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+<?xml-stylesheet href="chrome://global/skin/" type="text/css"?> <?xml-stylesheet
+href="chrome://zoteroobsidianbridge/content/batch-progress.css"
+type="text/css"?>
+<!DOCTYPE window>
+<window
+  xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+  xmlns:html="http://www.w3.org/1999/xhtml"
+  id="zotero-obsidian-bridge-batch-progress"
+  title="Zotero Obsidian Bridge - Annotation batch"
+  width="480"
+  height="210"
+  persist="screenX screenY"
+>
+  <html:head>
+    <html:meta charset="utf-8" />
+    <html:script
+      src="chrome://zoteroobsidianbridge/content/scripts/zoteroobsidianbridge-batch-progress.js"
+    />
+  </html:head>
+  <html:body>
+    <html:main id="batch-progress-app">
+      <html:h1 id="batch-headline">Preparing annotation cards…</html:h1>
+      <html:progress id="batch-progress" max="1" value="0"></html:progress>
+      <html:p id="batch-detail">
+        Completed cards are kept. Cancellation takes effect after the current
+        card.
+      </html:p>
+      <html:div class="actions">
+        <html:button id="cancel-batch" type="button">Cancel batch</html:button>
+        <html:button id="close-batch" type="button" hidden="hidden"
+          >Close</html:button
+        >
+      </html:div>
+    </html:main>
+  </html:body>
+</window>

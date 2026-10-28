@@ -1,0 +1,43 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - v**
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  release-preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Verify release identity and versions
+        run: npm run verify:release-config
+
+  create-release:
+    needs: release-preflight
+    uses: zotero-plugin-dev/workflows/.github/workflows/release-plugin.yml@main
+    # You can customize any of the inputs here.
+    # If you omit an input, its default value will be used.
+    with:
+      build: "npm run build"
+      release: "npm run release"
+    secrets: inherit

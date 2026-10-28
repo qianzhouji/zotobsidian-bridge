@@ -1,0 +1,90 @@
+{
+  "name": "zotero-obsidian-bridge",
+  "type": "module",
+  "version": "0.1.0",
+  "description": "Capture Zotero annotations as Markdown notes in Obsidian",
+  "packageManager": "npm@11.11.0",
+  "engines": {
+    "node": ">=22.8.0"
+  },
+  "config": {
+    "addonName": "Zotero Obsidian Bridge",
+    "addonID": "zotobsidian-bridge@qianzhouji",
+    "addonRef": "zoteroobsidianbridge",
+    "addonInstance": "ZoteroObsidianBridge",
+    "prefsPrefix": "extensions.zotero.zoteroobsidianbridge"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/qianzhouji/zotobsidian-bridge.git"
+  },
+  "author": "Personal project",
+  "homepage": "https://github.com/qianzhouji/zotobsidian-bridge",
+  "license": "AGPL-3.0-or-later",
+  "scripts": {
+    "start": "zotero-plugin serve",
+    "build": "node scripts/generate-third-party-notices.mjs && zotero-plugin build && tsc --noEmit",
+    "build:obsidian": "npm --prefix obsidian-plugin run build",
+    "fixture:r2": "node scripts/create-r2-test-pdf.mjs",
+    "test:native-note": "node --experimental-strip-types scripts/test-native-note.mjs",
+    "smoke:integration": "node --experimental-strip-types scripts/smoke-test-card.mjs",
+    "test:r6-stress": "R6_STRESS=1 node --experimental-strip-types scripts/smoke-test-card.mjs",
+    "test:companion-protocol": "node --experimental-strip-types scripts/test-companion-protocol.mjs",
+    "test:image-resource": "node --experimental-strip-types scripts/test-image-resource.mjs",
+    "test:auto-enrollment": "node --experimental-strip-types scripts/test-auto-enrollment.mjs",
+    "test:diagnostics": "node --experimental-strip-types scripts/test-diagnostics.mjs",
+    "test:companion-safety": "node --experimental-strip-types obsidian-plugin/scripts/test-safety.mjs",
+    "test:companion-ownership": "node --experimental-strip-types obsidian-plugin/scripts/test-queue-ownership.mjs",
+    "test:companion-r3": "npm run build:obsidian && node obsidian-plugin/scripts/test-r3-companion.mjs",
+    "test:release-config": "node scripts/test-release-config.mjs",
+    "verify:package": "node scripts/verify-package.mjs",
+    "verify:release-config": "node scripts/verify-release-config.mjs",
+    "prepare:release": "node scripts/prepare-release.mjs",
+    "lint:check": "prettier --check . && eslint .",
+    "lint:fix": "prettier --write . && eslint . --fix",
+    "release": "zotero-plugin release",
+    "test": "zotero-plugin test",
+    "update-deps": "npm update --save"
+  },
+  "dependencies": {
+    "@codemirror/lang-markdown": "^6.5.2",
+    "codemirror": "^6.0.2",
+    "diff": "^9.0.0",
+    "katex": "^0.19.1",
+    "markdown-it": "^15.0.3",
+    "turndown": "^7.2.4",
+    "turndown-plugin-gfm": "^1.0.2",
+    "yaml": "^2.9.1",
+    "zotero-plugin-toolkit": "^5.1.0-beta.13"
+  },
+  "devDependencies": {
+    "@types/chai": "^5.2.3",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^24.10.0",
+    "@types/turndown": "^5.0.6",
+    "@zotero-plugin/eslint-config": "^0.6.7",
+    "chai": "^6.2.1",
+    "eslint": "^9.39.2",
+    "linkedom": "^0.18.14",
+    "mocha": "^12.0.3",
+    "prettier": "^3.7.4",
+    "typescript": "^5.9.3",
+    "zotero-plugin-scaffold": "^0.9.3",
+    "zotero-types": "^4.1.0-beta.4"
+  },
+  "prettier": {
+    "printWidth": 80,
+    "tabWidth": 2,
+    "endOfLine": "lf",
+    "overrides": [
+      {
+        "files": [
+          "*.xhtml"
+        ],
+        "options": {
+          "htmlWhitespaceSensitivity": "css"
+        }
+      }
+    ]
+  }
+}

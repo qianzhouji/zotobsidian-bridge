@@ -1,0 +1,16 @@
+{
+  "name": "zotero-obsidian-bridge-companion",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit -p tsconfig.json && node esbuild.config.mjs",
+    "lint:check": "prettier --check . && eslint ."
+  },
+  "devDependencies": {
+    "esbuild": "0.25.5",
+    "obsidian": "1.14.4",
+    "typescript": "^5.9.3"
+  }
+}

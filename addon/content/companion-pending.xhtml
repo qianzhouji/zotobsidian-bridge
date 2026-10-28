@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+<?xml-stylesheet href="chrome://global/skin/" type="text/css"?> <?xml-stylesheet
+href="chrome://zoteroobsidianbridge/content/companion-pending.css"
+type="text/css"?>
+<!DOCTYPE window>
+<window
+  xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+  xmlns:html="http://www.w3.org/1999/xhtml"
+  id="zotero-obsidian-bridge-companion-pending"
+  title="Zotero Obsidian Bridge - Pending request"
+  width="500"
+  height="190"
+  persist="screenX screenY"
+>
+  <html:head>
+    <html:meta charset="utf-8" />
+    <html:script
+      src="chrome://zoteroobsidianbridge/content/scripts/zoteroobsidianbridge-pending-companion.js"
+    />
+  </html:head>
+  <html:body>
+    <html:main id="pending-app">
+      <html:h1 id="pending-headline"
+        >Obsidian 尚未响应，写入请求仍在队列中</html:h1
+      >
+      <html:progress id="pending-progress" max="1"></html:progress>
+      <html:p id="pending-detail">
+        可以继续使用 Zotero。收到 Obsidian 回执后，此窗口会自动更新并关闭。
+      </html:p>
+      <html:div class="actions">
+        <html:button id="close-pending" type="button" hidden="hidden"
+          >关闭</html:button
+        >
+      </html:div>
+    </html:main>
+  </html:body>
+</window>
