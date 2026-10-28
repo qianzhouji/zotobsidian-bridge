@@ -250,7 +250,7 @@
 
 交付物：CI 成功记录、版本化安装包、迁移验证、发布说明和安装文档。
 
-执行状态（2026-10-29）：干净临时检出中的两端锁定依赖安装、自动化矩阵、打包审计及 SHA-256 生成通过；root 与 companion 的完整 `npm audit` 均为零漏洞，CI 已改为阻断式全依赖审计。XPI 包含 AGPL `LICENSE` 和 39 个已发布运行时依赖的 `THIRD_PARTY_NOTICES.txt`；companion ZIP 包含项目 `LICENSE`。正式 Obsidian ID `zotero-card-bridge` 已在 `.scaffold/r7-vault` 验证安装/启用、停用/重启用、合成 0.1.0→0.1.1 升级并保留设置、恢复 0.1.0、卸载/重装。正式 Zotero ID `zotobsidian-bridge@qianzhouji` 与 companion ID 的真实配对写入/ACK 仍需补测；此前实测使用早期开发 ID。仓库为私有 `qianzhouji/zotobsidian-bridge`，本地 `origin`、`repository`、`homepage` 和 Zotero updater fallback 已指向该仓库；待初始推送并完成远程 GitHub Actions。正式 Release 与公开更新仍未进行。R7 未完成项详见 [`r7-execution-report.md`](r7-execution-report.md)。R4-C 的命名非成员群组可见性 fixture、R5 的 pristine-profile walkthrough，以及 R6 的双设备 iCloud 冲突、真实 File Provider/网络不可用和 1000 条宿主 UI 批次仍按各自验收记录保留为未完成。
+执行状态（2026-10-29）：干净临时检出中的两端锁定依赖安装、自动化矩阵、打包审计及 SHA-256 生成通过；root 与 companion 的完整 `npm audit` 均为零漏洞，CI 已改为阻断式全依赖审计。XPI 包含 AGPL `LICENSE` 和 39 个已发布运行时依赖的 `THIRD_PARTY_NOTICES.txt`；companion ZIP 包含项目 `LICENSE`。正式 Obsidian ID `zotero-card-bridge` 已在 `.scaffold/r7-vault` 验证安装/启用、停用/重启用、合成 0.1.0→0.1.1 升级并保留设置、恢复 0.1.0、卸载/重装。正式 Zotero ID `zotobsidian-bridge@qianzhouji` 与 companion ID 的真实配对写入/ACK 仍需补测；此前实测使用早期开发 ID。项目树已通过 GitHub 集成写入私有 `qianzhouji/zotobsidian-bridge` 的 `main`，commit `299a09d3ceec5dc0d6e9dc31913dd2560bebe9dd` 的 [GitHub Actions](https://github.com/qianzhouji/zotobsidian-bridge/actions/runs/40728760703) 通过，构建产物与 SHA-256 已核验。因本机 Git CLI 凭据不可用，本地 checkout 仍停在旧 HEAD 且有未提交改动；后续提交前须认证后先安全协调本地和远程历史，不要重置工作树。正式 Release 与公开更新仍未进行。R7 未完成项详见 [`r7-execution-report.md`](r7-execution-report.md)。R4-C 的命名非成员群组可见性 fixture、R5 的 pristine-profile walkthrough，以及 R6 的双设备 iCloud 冲突、真实 File Provider/网络不可用和 1000 条宿主 UI 批次仍按各自验收记录保留为未完成。
 
 ## 11. R8：试用、问题收敛与完成判定
 

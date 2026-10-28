@@ -44,6 +44,13 @@ separate preflight that rejects placeholder repository metadata or IDs,
 requires the Zotero and Obsidian versions to match, and requires the pushed
 `v<version>` tag to match the package version exactly.
 
+The first remote run passed on the project's private repository:
+[GitHub Actions run #1](https://github.com/qianzhouji/zotobsidian-bridge/actions/runs/40728760703),
+commit `299a09d3ceec5dc0d6e9dc31913dd2560bebe9dd`. Its workflow artifact is
+temporary (14-day retention), not a release. The exact artifact digest and
+package checksums are in the [R7 execution report](r7-execution-report.md).
+GitHub emitted non-blocking Node 20-to-24 and Ubuntu 26 migration notices.
+
 ## Installation and upgrade test
 
 Install only in the isolated Zotero development profile until the release gate
@@ -67,7 +74,9 @@ The manual Zotero install/upgrade/disable/uninstall/reinstall sequence passed
 in the isolated R7 profile using the earlier development add-on ID. The current
 Obsidian companion ID's install, enable/disable, synthetic in-place upgrade,
 uninstall, and reinstall lifecycle passed in `.scaffold/r7-vault`; paired live
-write/ACK still needs repeating with both permanent IDs. The XPI manifest currently
+write/ACK still needs repeating with both permanent IDs. Remote CI has passed,
+but the local Git checkout remains behind the remote snapshot and must be
+reconciled with authenticated Git before further commits. The XPI manifest currently
 targets Zotero 10.0.x; Zotero 10.0.6 is the locally recorded development
 baseline. macOS is the only platform in the current hands-on development
 baseline; Windows and Linux compatibility is not yet claimed.
