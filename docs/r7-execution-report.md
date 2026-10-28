@@ -84,10 +84,15 @@ R6 remains incomplete as recorded in
 | Remote GitHub Actions                                       | PASS                                        | [Run #1](https://github.com/qianzhouji/zotobsidian-bridge/actions/runs/40728760703) succeeded for commit `299a09d3ceec5dc0d6e9dc31913dd2560bebe9dd`; the `verify` job passed. Artifact `zotero-obsidian-bridge-299a09d3ceec5dc0d6e9dc31913dd2560bebe9dd` (1,019,201 bytes) has digest `sha256:65288ed4500e59171d5a5bd7711af67225c2458f5615c0216d0a46c443ef56d2` and is retained until 2026-11-11. Linux-built XPI SHA-256: `01db56c080037620addedd4894a2291327b781661fe639c231024766ec351bdc`; companion ZIP SHA-256: `4e5c0533dfd5d9098ddeabd692844247d2cf188181a8b10f5ccc507a5a1c7a01`; embedded checksum files matched. No GitHub Release was created. |
 | `git diff --check`                                          | PASS                                        | Ran against the project checkout after implementation.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 
-The successful Actions run reported a non-blocking maintenance warning because
+The initial successful Actions run reported a non-blocking maintenance warning because
 the selected official actions are currently on Node 20 while GitHub is moving
 runners to Node 24, plus an Ubuntu 26 migration notice. The job itself passed;
 these notices should be reviewed in a future workflow maintenance change.
+
+The documentation update was committed as `5a6ae40db68d507a10ce710d1c4de43c3369cc5b`.
+[Actions run #7](https://github.com/qianzhouji/zotobsidian-bridge/actions/runs/40730587766)
+also passed on GitHub-hosted Linux in 54 seconds. Its artifact digest is
+`sha256:fa2db40ca6e4c530793989913b47a6fb66310a2f5b18d7c09f142d764d1d90e8`.
 
 The local clean-checkout run also passed the service-level R6 stress test; it
 does not change the separate R6 live items. Its 1000-item result is not a
