@@ -27,13 +27,30 @@ project `LICENSE`.
 
 ## Current release gate
 
-The current XPI is an internal test artifact, not a public release. The
+The current XPI is a locally verified release candidate, not a public release. The
 configured project repository is
 [`qianzhouji/zotobsidian-bridge`](https://github.com/qianzhouji/zotobsidian-bridge),
-currently private, with Zotero ID `zotobsidian-bridge@qianzhouji` and Obsidian
-ID `zotero-card-bridge`. No Git tag or GitHub Release has been created. Keep
-generated updater metadata unpublished until the project is ready for a public
-release and the repository/update assets are accessible to intended users.
+now public, with Zotero ID `zotobsidian-bridge@qianzhouji` and Obsidian ID
+`zotero-card-bridge`. GitHub currently reports zero tags and zero Releases.
+The XPI is configured to read the stable updater manifest from
+`releases/download/release/update.json`; that manifest points to the versioned
+`v0.1.0` XPI and contains its SHA-512. This matches the upstream Zotero plugin
+release convention. Anonymous checks on 2026-10-29 returned HTTP 404 for both
+the stable manifest and versioned XPI because no release assets have been
+published. Do not claim auto-update acceptance until both URLs return the
+expected files to an unauthenticated client and the downloaded hash matches
+the candidate.
+
+The local 0.1.0 R8 trial candidates were regenerated with Node.js 24.22.1 and
+verified on 2026-10-29:
+
+- XPI SHA-256: `65859461c7cdb19e6fd5ff4ae1ee08d3247f712453b6b446c37d738b2d04e46d`
+- Companion ZIP SHA-256: `65e320c25f50553776d39fe62297d941b4d13c224062955ba7f4213ca08727fd`
+
+The repository is public. No tag or public Release has been created. Publish
+only after the remaining product acceptance gates; then verify the public
+updater manifest, download assets, and hashes from a clean unauthenticated
+session.
 
 The GitHub Actions workflow runs locked dependency installation for both
 plugins, formatting and lint checks, TypeScript/build checks, the focused

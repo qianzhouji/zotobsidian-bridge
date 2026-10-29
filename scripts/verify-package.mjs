@@ -60,6 +60,7 @@ export function verifyPackage(xpiPath) {
     "LICENSE",
     "THIRD_PARTY_NOTICES.txt",
     "prefs.js",
+    "content/preferences.xhtml",
     "content/editor.xhtml",
     "content/editor.css",
     "content/batch-progress.xhtml",
@@ -76,6 +77,25 @@ export function verifyPackage(xpiPath) {
     if (!entrySet.has(entry)) {
       throw new Error(`Required XPI entry is missing: ${entry}`);
     }
+  }
+
+  const preferencesXhtml = execFileSync(
+    "unzip",
+    ["-p", absoluteXpiPath, "content/preferences.xhtml"],
+    { encoding: "utf8", maxBuffer },
+  );
+  const preferenceRoots = [
+    ...preferencesXhtml.matchAll(/^<(?:linkset|groupbox|vbox)\b[\s\S]*?>/gm),
+  ];
+  if (
+    preferenceRoots.length === 0 ||
+    preferenceRoots.some(
+      ([root]) => !root.includes('xmlns:html="http://www.w3.org/1999/xhtml"'),
+    )
+  ) {
+    throw new Error(
+      "Every top-level preferences fragment must declare the XHTML namespace.",
+    );
   }
 
   const licenseText = execFileSync(

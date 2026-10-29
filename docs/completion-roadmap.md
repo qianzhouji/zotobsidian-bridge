@@ -2,6 +2,8 @@
 
 日期：2026-10-28。本文定义分阶段工作和验收标准；计划条目不因代码存在而自动视为完成，具体执行状态以验收记录为准。
 
+状态说明：下方早期执行记录中的 R7 设置面板、仓库可见性和 Git 状态已由文末 2026-10-29 更新覆盖。
+
 执行记录（2026-10-29）：R0–R3 已完成计划内隔离验收。R4-A 原生 Zotero 笔记、R4-B 图片资源与图片批注现场验收通过；R4-C 范围内/外收录、六条任务重启恢复、不可用文库拒绝、108 条历史批次中途取消并续跑至完成均通过，119 张批注卡来源 ID 唯一。读取错误路径通过故障注入验证。Zotero 标准群组 ACL 不提供“成员可见但不可读”状态；具名私有群组的非成员可见性测试尚无独立 owner/member fixture，按用户决定暂缓。现有 `group:77/annotation/ANN001` retry 未触碰；R3 精确进程中断边界仍由自动化故障注入覆盖。R5 隔离 UX 验收已通过，覆盖设置/连接检查、重试状态、诊断脱敏、恢复副本、主题及窄屏长标题；单独的全新 profile 冷启动入门演练未执行。R6 已通过 1/100/1000 条本地压力夹具、失败注入、真实只读目录权限测试、单机 iCloud 上传/移除下载/重新水合、30 分钟 UI soak 和 companion 启停；双设备冲突副本、真实云端/网络不可用恢复、1000 条真实宿主 UI 批次尚未运行。R7 的本地全量审计、许可证打包、远程 GitHub Actions、隔离 Obsidian companion 生命周期，以及正式 Zotero ID `zotobsidian-bridge@qianzhouji` 与 Obsidian ID `zotero-card-bridge` 的真实配对写入/ACK 均已通过。Git 历史协调现已完成：本地与远程 `main` 同步于 `8ae9bd4`，原本地提交链和协调前完整工作树快照保存在未推送的本地备份分支。Zotero 设置面板未显示可见控件，配对是通过隔离实例开发者控制台配置，需单独调查。R8 候选版试用未开始。详细证据见 [`r0-r1-execution-report.md`](r0-r1-execution-report.md)、[`r2-execution-report.md`](r2-execution-report.md)、[`r3-execution-report.md`](r3-execution-report.md)、[`r4-a-execution-report.md`](r4-a-execution-report.md)、[`r4-b-execution-report.md`](r4-b-execution-report.md)、[`r4-c-execution-report.md`](r4-c-execution-report.md)、[`r5-execution-report.md`](r5-execution-report.md)、[`r6-execution-report.md`](r6-execution-report.md)。
 
 ## 1. 交付目标与现状
@@ -12,7 +14,7 @@
 
 约束：先交付单机桌面版本；多设备并发同步、手机端、OCR 和自动生成知识双链不属于本轮交付。iCloud 测试验证单机使用云盘时的文件行为，不代表实现分布式同步。插件创建的来源链接用于回到文献；不自动安排概念笔记之间的链接。
 
-当前已有：Zotero 插件主体、卡片身份和来源字段管理、编辑器、同步队列、批量操作、companion、原生 Zotero 笔记导入、图片资源、R4-C 范围自动建卡与可取消/恢复历史批次、R5 配置/恢复/诊断体验、构建和本地测试脚本。当前缺少：具名私有群组的非成员可见性实测、单独的 R5 全新 profile 冷启动入门演练、R6 双设备冲突/实际不可用恢复/全量桌面验收、R7 Zotero 设置面板调查及正式发布，以及 R8 候选版试用。R6 已有阶段性本地压力与单机 iCloud 文件提供者证据，详见 [`r6-execution-report.md`](r6-execution-report.md)。R7 本地自动化矩阵、远程 CI、正式 ID 配对写入/ACK 和本地/远程 Git 协调均已完成；最新状态与剩余项见 [`r7-execution-report.md`](r7-execution-report.md)。若未来需要验证另一种服务端 ACL 中的真实读取拒绝，应另建对应的测试服务/账号夹具。
+当前已有：Zotero 插件主体、卡片身份和来源字段管理、编辑器、同步队列、批量操作、companion、原生 Zotero 笔记导入、图片资源、R4-C 范围自动建卡与可取消/恢复历史批次、R5 配置/恢复/诊断体验、构建和本地测试脚本。当前缺少：具名私有群组的非成员可见性实测、单独的 R5 全新 profile 冷启动入门演练、R6 双设备冲突/实际不可用恢复/全量桌面验收、R7 仓库可见性决策及公开更新端点验收，以及 R8 候选版试用。R6 已有阶段性本地压力与单机 iCloud 文件提供者证据，详见 [`r6-execution-report.md`](r6-execution-report.md)。R7 本地自动化矩阵、远程 CI、正式 ID 配对写入/ACK、本地/远程 Git 协调以及 Zotero 设置面板隔离现场验收均已完成；最新状态与剩余项见 [`r7-execution-report.md`](r7-execution-report.md)。若未来需要验证另一种服务端 ACL 中的真实读取拒绝，应另建对应的测试服务/账号夹具。
 
 先前的完成百分比是粗略判断，不是测试覆盖率。后续采用逐项验收；“代码存在”“本地自动测试通过”“桌面实测通过”“可发布”分别记录。
 
@@ -293,4 +295,6 @@ npm run verify:package
 
 其中 `npm test` 需要隔离 Zotero 宿主及正确的本机配置；它当前的启动测试不能替代完整 UI 验收。R1 的生命周期和故障注入已纳入集成/companion 测试。R2 的可重复 PDF 夹具由 `npm run fixture:r2` 生成，写入被忽略的 `.scaffold/r2-fixtures/`。
 
-R2 与 R3 的计划内隔离现场矩阵已关闭；R3 精确写入/回执间断仍以确定性故障注入覆盖，而非桌面强杀。R4-A、R4-B 现场验收完成。R4-C 范围内/外收录、跨重启恢复、不可用文库拒绝、108 条批次中途取消/续跑均通过；读取失败注入确认 UI 明确报错且没有新建批次。Zotero 标准群组 ACL 不支持成员可见但不可读的状态；具名非成员群组 fixture 按用户决定暂缓。R5 设置检查、重试/状态、诊断脱敏、恢复副本、深色主题及窄屏长标题的隔离 UX 验收已通过；全新 profile 冷启动演练未单独执行。R6 的双设备冲突、实际 File Provider/网络中断及 1000 条宿主 UI 批次尚未完成。R7 远程 CI、依赖审计、许可证打包、companion 生命周期、正式 ID 的隔离配对写入/ACK 和本地/远程 Git 同步均已通过；Zotero 设置面板未显示控件，仍需调查。R8 试用未开始。各阶段事实以 `acceptance-report.md` 和对应执行报告为准，计划中的标准不能视为已通过结果。
+R2 与 R3 的计划内隔离现场矩阵已关闭；R3 精确写入/回执间断仍以确定性故障注入覆盖，而非桌面强杀。R4-A、R4-B 现场验收完成；R4-C 具名非成员群组 fixture 按用户决定暂缓。R5 隔离 UX 验收通过，全新 profile 冷启动演练未单独执行。R6 的双设备冲突、实际 File Provider/网络中断及 1000 条宿主 UI 批次尚未完成。R7 的 CI、依赖审计、许可证打包、companion 生命周期、正式 ID 配对写入/ACK 和设置面板修复均已通过；仓库已公开，但无 tag/Release，本地和远程 `main` 当前均为 `d8befec`，未提交本地修复尚未推送。R8 试用未开始。各阶段事实以 `acceptance-report.md` 和对应执行报告为准，计划中的标准不能视为已通过结果。
+
+R7 更新（2026-10-29，覆盖上文 R7 状态）：Zotero 设置面板问题已修复；隔离 profile 中控件正常显示，设置检查检测到 companion 在线，并提示先从 Obsidian 执行 Vault 写入权限探测。`verify:package` 加入 XHTML namespace 防回归检查。更新地址符合 Zotero 稳定通道约定，0.1.0 本地产物及校验和已核验。仓库现已公开，但尚无 tag/Release，匿名访问稳定更新清单和版本化 XPI 均返回 404，因为发布资产尚未创建。最新本地与远程 `main` 均指向 `d8befec`；本地设置修复及文档更新尚未提交或推送。正式发布仍受其他阶段验收门槛约束。详见 [`r7-execution-report.md`](r7-execution-report.md) 与 [`release.md`](release.md)。
