@@ -2,10 +2,11 @@
 
 **Status: IN PROGRESS.** Local CI-equivalent verification, paired artifact
 generation, isolated companion lifecycle, and a real paired request/response/
-ACK using both selected permanent IDs pass. The remaining R7 work is safe
-reconciliation of the disconnected local and remote Git histories, review of
-the Zotero settings-pane rendering issue, and release preparation. R6 remains
-incomplete as recorded in
+ACK using both selected permanent IDs pass. Local and remote Git histories
+have now been safely reconciled without rewriting remote history; the original
+local history and pre-reconciliation working-tree snapshot remain available as
+local backup branches. Remaining R7 work is review of the Zotero settings-pane
+rendering issue and release preparation. R6 remains incomplete as recorded in
 [`r6-execution-report.md`](r6-execution-report.md).
 
 ## Baseline and Safety
@@ -16,14 +17,15 @@ incomplete as recorded in
 - The project-owned GitHub repository is private. The project tree was uploaded
   to its `main` branch through the authorized GitHub integration as commit
   `299a09d3ceec5dc0d6e9dc31913dd2560bebe9dd`.
-- `git fetch origin main` now succeeds. It fetched remote `main` at
-  `35af6e31dbde7c65da16332b5c8cba42311c0738`; local `main` remains at
-  `a9d4e59`. `git rev-list --left-right --count main...origin/main` reports
-  `412 4`, and `git merge-base main origin/main` finds no common ancestor.
-  These are disconnected histories, not a fast-forward situation. No merge,
-  reset, rebase, or push was attempted; preserve the working tree and choose an
-  explicit history-reconciliation strategy before syncing. Do not treat local
-  `HEAD` as the remote CI commit.
+- At reconciliation start, local `main` was `a9d4e59` and fetched remote
+  `main` was `35af6e31dbde7c65da16332b5c8cba42311c0738`; they had no common
+  ancestor (`412` local-only and `4` remote-only commits by reachability).
+  The current local worktree was snapshotted to
+  `backup/pre-reconcile-local-main-20261029`, the original local branch was
+  preserved as `backup/main-legacy-20261029`, and local `main` was based on the
+  remote history. Only the four updated progress documents were added as a
+  follow-up commit; no remote history was rewritten. Final local `main` and
+  `origin/main` both point to `8ae9bd4`, and the worktree is clean.
 - No tag, public release, ordinary Zotero profile, or primary Obsidian Vault
   was modified for this R7 work.
 - Current package version: `0.1.0`; selected Zotero add-on ID is
@@ -104,15 +106,11 @@ Zotero host UI benchmark.
 
 ## Remaining R7 Work
 
-1. Reconcile the local checkout with remote `main`. Fetch now works, but
-   `main` and `origin/main` have no common ancestor (`412` local-only and `4`
-   remote-only commits by reachability). Preserve local changes and agree on a
-   deliberate reconciliation plan before creating or pushing history.
-2. Investigate why the Zotero add-on settings pane rendered without visible
+1. Investigate why the Zotero add-on settings pane rendered without visible
    controls in this run. Pairing was completed by setting the Vault ID through
    the isolated Zotero Developer JavaScript console; the real paired write/ACK
    passed, but settings-pane usability was not accepted through the UI.
-3. Before public distribution, decide repository visibility and verify the
+2. Before public distribution, decide repository visibility and verify the
    updater manifest, release assets, license notices, and install/recovery
    documentation against the public release.
 

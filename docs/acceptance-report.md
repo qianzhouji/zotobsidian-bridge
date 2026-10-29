@@ -197,19 +197,21 @@ not closed by the R7 work.
 
 The full evidence and blockers are maintained in
 [`r7-execution-report.md`](r7-execution-report.md). The project tree is on the
-private repository and remote CI passed. `git fetch` now succeeds, but local
-`main` and `origin/main` have disconnected histories (412 local-only and 4
-remote-only commits; no merge base), so they have not been reconciled. No tag
-or public release has been created. The selected permanent IDs have passed an
-isolated paired write/ACK; the Zotero settings-pane rendering issue and safe
-Git history reconciliation remain open.
+private repository and remote CI passed. Local `main` and `origin/main` are
+synced at `8ae9bd4`, with a clean worktree. The pre-reconciliation local
+history and working-tree snapshot are retained in
+`backup/main-legacy-20261029` and
+`backup/pre-reconcile-local-main-20261029`; neither backup was pushed. No tag
+or public release has been created. The selected permanent IDs passed an
+isolated paired write/ACK. The Zotero settings-pane rendering issue remains
+open.
 
 ## Beta Gate
 
 Do not call this beta-ready until progress-window cancellation is verified in
 Zotero, the R5 pristine-profile walkthrough is recorded, the real lifecycle
-cases and isolated iCloud scenarios pass, the Zotero settings-pane issue and
-Git history reconciliation are resolved, repository visibility and update
-access are settled, and the required CI, lifecycle, and recovery checks pass.
+cases and isolated iCloud scenarios pass, the Zotero settings-pane issue is
+resolved, repository visibility and update access are settled, and the required
+CI, lifecycle, and recovery checks pass.
 Any data loss, silent overwrite, or incorrect source-to-card mapping remains a
 release blocker.
