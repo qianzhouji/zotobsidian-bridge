@@ -473,6 +473,23 @@ const { ensureVaultDirectory } =
 const { waitForVaultWrites } = await import("../src/adapters/vault-storage.ts");
 const { validateVaultRelativePath } = await import("../src/core/models.ts");
 
+const companionManagedDirectory = path.join(
+  vaultPath,
+  "Zotero Literature",
+  "Companion-managed",
+  "Nested",
+);
+prefs.set("extensions.zotero.zoteroobsidianbridge.writerMode", "companion");
+assert.equal(
+  await ensureVaultDirectory(
+    vaultPath,
+    "Zotero Literature/Companion-managed/Nested",
+  ),
+  companionManagedDirectory,
+);
+assert.equal(await exists(companionManagedDirectory), false);
+prefs.delete("extensions.zotero.zoteroobsidianbridge.writerMode");
+
 await createCardFromAnnotation({}, { key: annotationKey, libraryID: 1 });
 let card = await fs.readFile(annotationPath, "utf8");
 card = card.replace(

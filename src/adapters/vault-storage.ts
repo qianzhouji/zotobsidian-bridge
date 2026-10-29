@@ -192,6 +192,7 @@ export async function ensureVaultDirectory(
 ): Promise<string> {
   const target = resolveVaultPath(rootPath, relativePath);
   await rejectSymlinkComponents(rootPath, relativePath);
+  if (currentWriterMode() === "companion") return target;
   if (await IOUtils.exists(target)) {
     if (!Zotero.File.pathToFile(target).isDirectory()) {
       throw new Error(`Vault path is not a directory: ${relativePath}`);

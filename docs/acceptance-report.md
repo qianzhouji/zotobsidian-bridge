@@ -210,6 +210,31 @@ isolated paired write/ACK. The Zotero settings pane now renders and its setup
 check reports the companion online. Publication remains pending release assets
 and live unauthenticated endpoint/hash verification.
 
+## R8: Candidate Trial and Release Decision
+
+**Status: IN PROGRESS; release not approved.** The candidate artifacts and
+automated suites are recorded in [`r8-execution-report.md`](r8-execution-report.md).
+The post-fix capture, page metadata, Markdown round-trip, duplicate reuse,
+deferred-write recovery, and queued-work restarts of both isolated apps passed.
+
+| Case                                     | Result                  | Evidence / remaining work                                                                                                         |
+| ---------------------------------------- | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| Post-fix first write and folder creation | PASS (isolated live)    | Companion owns folder creation; regression assertion added.                                                                       |
+| Capture, edit, and repeated card action  | PASS (one trial series) | Correct source/page mapping and body preservation. Restart/replay of the same annotation does not count as a new reading session. |
+| Deferred request and queue recovery      | PASS (isolated live)    | Closing the open test note drained the request; connected status and note content were preserved.                                 |
+| Obsidian restart with queued work        | PASS (isolated live)    | Request survived app exit, was recovered after isolated Vault relaunch, and the queue drained with card identity/body preserved.  |
+| Zotero restart with queued work          | PASS (isolated live)    | Isolated profile/data args and fixture window were verified; request survived restart and drained after the target note closed.   |
+| Three independent reading sessions       | INCOMPLETE              | One independent capture session counted; two more distinct sessions remain.                                                       |
+| Final exact-artifact reinstall           | NOT RUN                 | Freeze the candidate, reinstall the exact XPI and companion artifacts, then repeat the critical flow.                             |
+
+The initial Zotero window mismatch was resolved for the current trial after
+the user saved/exited the everyday instance. Process arguments and the visible
+fixture title positively identified the isolated instance before restart
+testing. No Zotero UI action was taken against the everyday profile after the
+mismatch was detected; earlier read-only checks do not establish whether
+prior state changed. R8 does not close outstanding R4-C, R5, or R6 items. No
+tag or public release has been created.
+
 ## Beta Gate
 
 Do not call this beta-ready until progress-window cancellation is verified in
