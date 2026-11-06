@@ -8,6 +8,11 @@ export interface EditorDraft {
   baseline: UserNoteContent;
   draft: UserNoteContent;
   updatedAt: string;
+  pendingSave?: {
+    requestId: string;
+    baseline: UserNoteContent;
+    snapshot: UserNoteContent;
+  };
 }
 
 export interface EditorConflictArchive extends EditorDraft {
@@ -57,7 +62,12 @@ function validateDraft(value: unknown, expectedCardID: string): EditorDraft {
     typeof draft.relativePath !== "string" ||
     !isUserNoteContent(draft.baseline) ||
     !isUserNoteContent(draft.draft) ||
-    typeof draft.updatedAt !== "string"
+    typeof draft.updatedAt !== "string" ||
+    (draft.pendingSave !== undefined &&
+      (typeof draft.pendingSave?.requestId !== "string" ||
+        !/^[0-9a-f-]{36}$/i.test(draft.pendingSave.requestId) ||
+        !isUserNoteContent(draft.pendingSave.baseline) ||
+        !isUserNoteContent(draft.pendingSave.snapshot)))
   ) {
     throw new Error("Saved editor draft is malformed; it was left untouched.");
   }

@@ -7,7 +7,33 @@ release.
 
 ## Current Status
 
-Status as of 2026-10-29. Acceptance means the named scenario was observed in the
+C-series update (2026-11-07): C3-C4 implementation and most isolated-host
+checks are complete. Real expanded-editor candidate paging and canonical
+wikilink insertion passed; automated tests verify that note searches remain
+available while an unrelated write request is pending. Real Chinese IME
+composition remains open. C4 live rendering of remote-image, unsupported
+embed, raw-HTML, and unsafe-link fixtures passed with zero requests to a local
+network probe. C5-A/B now automatically discover relations among visible cards
+and keep each relation's source anchor independent. Automated regressions and
+the isolated expanded-editor root/Bayes/Motion scenario passed. The Reader
+popup itself still showed Zotero's native comment on first click in this
+candidate and needs separate diagnosis; it is not counted as an in-place popup
+pass. Parallel Reader isolation, host card limits, and full lifecycle matrix
+also remain open. C0-C2 retain their own host gates and C6-C7 are not
+implemented, so the C series is not complete. See the [C3-C4 progress
+report](docs/c3-c4-progress.md), [C5 execution report](docs/c5-execution-report.md),
+[C5-A/B host follow-up](docs/c5-ab-execution-report.md), and [C0-C2 host
+follow-up](docs/c0-c2-host-follow-up-2026-11-06.md) for evidence boundaries and
+remaining gates. No new commit/push or release.
+
+Bridge-mode update (2026-11-04): B5 save/sync recovery changes and automated
+regressions are implemented. The candidate is not yet installed for live B5
+acceptance; B4's live save-failure recovery test is deferred by the user.
+See the [B5 execution report](docs/b5-execution-report.md) for changes, state
+semantics, evidence, and remaining desktop checks, and the
+[Bridge-mode roadmap](docs/bridge-mode-roadmap.md) for B0-B8.
+
+The following R-stage snapshot is as of 2026-10-29. Acceptance means the named scenario was observed in the
 isolated desktop setup; local automation and runtime fault injection are called
 out separately.
 
@@ -43,6 +69,18 @@ original product stages. The detailed development tools, implementation steps,
 test cases, and acceptance criteria are maintained in
 [`docs/completion-roadmap.md`](docs/completion-roadmap.md). Keep that document
 as the detailed source of truth and this section as the current progress view.
+
+The next feature track is **B0–B8: Bridge-mode inline Markdown cards**. Its
+development operations, dependencies, test matrix, and exit criteria are in
+[`docs/bridge-mode-roadmap.md`](docs/bridge-mode-roadmap.md). This is a plan,
+with execution status tracked separately: B0's metadata, naming, migration,
+automated regression, and isolated Obsidian view checks have passed. B1 has a
+read-only Reader prototype and component tests, but real saved-annotation
+popup replacement is not yet accepted because the isolated Reader click did
+not expose a popup to the adapter. The existing text-selection popup extension
+does not establish that capability. See
+[`docs/b0-b1-execution-report.md`](docs/b0-b1-execution-report.md). The
+remaining R-stage release gates below continue to apply.
 
 | Phase | Goal and main tools                                                                                                                               | Exit gate / current state                                                                                                                                                                                                                                                                          |
 | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -104,8 +142,15 @@ links are outside this single-machine release.
 
 ## Architecture and Data Safety
 
-- Zotero owns source metadata and annotations; Markdown cards carry stable
-  source IDs and card UUIDs in frontmatter.
+- Zotero owns source metadata and annotations. Annotation cards expose only
+  the paper title as plugin-generated Obsidian Properties. Bridge identity and
+  synchronization fields are stored in an empty inline span's payload
+  attribute, outside visible Properties. Reading View and Live Preview were
+  verified in the isolated B0 Vault; Source mode intentionally shows raw
+  Markdown. Legacy path migration runs through the shared manual/background
+  synchronization service, including when the source hash is unchanged. See
+  [`docs/card-format.md`](docs/card-format.md) for `PxxNxx` naming and legacy
+  card migration behavior.
 - Plugin-owned source blocks are refreshed independently from the user's
   `My notes` content and unknown YAML properties.
 - The default writer is direct mode. Optional companion mode uses a durable
@@ -140,7 +185,8 @@ Use `npm start` only after inspecting `.env`; it must point at the project-local
 Zotero profile and data directory. See [`docs/development-setup.md`](docs/development-setup.md)
 for setup, [`docs/acceptance-report.md`](docs/acceptance-report.md) for current
 test results, [`docs/card-format.md`](docs/card-format.md) for identity and
-field ownership, [`docs/companion-protocol.md`](docs/companion-protocol.md) and
+field ownership, [`docs/b0-b1-execution-report.md`](docs/b0-b1-execution-report.md)
+for Bridge-mode implementation status, [`docs/companion-protocol.md`](docs/companion-protocol.md) and
 [`obsidian-plugin/README.md`](obsidian-plugin/README.md) for companion setup,
 [`docs/manual-workflow.md`](docs/manual-workflow.md) for user workflows, and
 [`docs/release.md`](docs/release.md) for packaging.

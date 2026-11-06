@@ -300,3 +300,11 @@ npm run verify:package
 R2 与 R3 的计划内隔离现场矩阵已关闭；R3 精确写入/回执间断仍以确定性故障注入覆盖，而非桌面强杀。R4-A、R4-B 现场验收完成；R4-C 具名非成员群组 fixture 按用户决定暂缓。R5 隔离 UX 验收通过，全新 profile 冷启动演练未单独执行。R6 的双设备冲突、实际 File Provider/网络中断及 1000 条宿主 UI 批次尚未完成。R7 的 CI、依赖审计、许可证打包、companion 生命周期、正式 ID 配对写入/ACK 和设置面板修复均已通过；仓库已公开，但无 tag/Release，更新端点尚未核验。R8 候选试用验收已完成，正式发布仍被 R4-C/R5/R6/R7 余项阻塞，具体证据见 [`r8-execution-report.md`](r8-execution-report.md)。各阶段事实以 `acceptance-report.md` 和对应执行报告为准，计划中的标准不能视为已通过结果。
 
 R7 更新（2026-10-29，覆盖上文 R7 状态）：Zotero 设置面板问题已修复；隔离 profile 中控件正常显示，设置检查检测到 companion 在线，并提示先从 Obsidian 执行 Vault 写入权限探测。`verify:package` 加入 XHTML namespace 防回归检查。更新地址符合 Zotero 稳定通道约定，0.1.0 本地产物及校验和已核验。仓库现已公开，但尚无 tag/Release，匿名访问稳定更新清单和版本化 XPI 均返回 404，因为发布资产尚未创建。最新本地与远程 `main` 均指向 `d8befec`；本地设置修复及文档更新尚未提交或推送。正式发布仍受其他阶段验收门槛约束。详见 [`r7-execution-report.md`](r7-execution-report.md) 与 [`release.md`](release.md)。
+
+## 13. 后续 B0–B8：Bridge 模式内嵌编辑
+
+下一阶段目标为：在 Bridge 模式下，点击已保存的 PDF 高亮直接出现可编辑/预览 Markdown 的小卡片，局部隐藏原生评论界面；切回原生模式或停用插件后恢复原生操作，不覆盖原生评论数据。
+
+完整技术路径见 [`bridge-mode-roadmap.md`](bridge-mode-roadmap.md)，包括逐阶段操作、工具、依赖、产物、验收指标、26 项核心测试和旧发布门槛的承接。B0–B8 使用独立编号，不重写 R0–R8 的历史结论。
+
+当前仅完成规划。开工先关闭 B0 的两个已发现缺口：隐藏元数据载荷仍可能渲染成正文，以及旧卡片迁移尚未共用于后台同步。随后 B1 单独验证“已保存批注评论浮窗”的真实接入能力；已通过的选区弹窗追加按钮测试不能代替它。B 阶段完成也不自动关闭 R4-C/R5/R6/R7 的待验收事项或授权发布。

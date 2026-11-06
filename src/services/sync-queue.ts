@@ -35,6 +35,7 @@ import {
 } from "./card-updater.ts";
 import { snapshotNativeNote } from "./native-note-card.ts";
 import { exportAnnotationImage } from "./image-assets.ts";
+import { migrateLegacyAnnotationCardPath } from "./annotation-card-path.ts";
 
 const prefPrefix = "extensions.zotero.zoteroobsidianbridge";
 const defaultOutputFolder = "Zotero Literature";
@@ -659,6 +660,20 @@ async function syncAnnotationSource(
   const paperHash = await sha256(paper);
   await updatePaperOverview(paper, paperHash, "available");
 
+  const relativePath = await migrateLegacyAnnotationCardPath(
+    rootPath,
+    folder,
+    paper,
+    annotation,
+    located.relativePath,
+    located.cardID,
+    sourceID,
+  );
+  if (relativePath !== located.relativePath) {
+    index.cards[sourceID] = makeIndexEntry(located.cardID, relativePath);
+    await writeCardIndex(indexPath(), index);
+  }
+
   if (
     readFrontmatterValue(located.markdown, "bridge_source_hash") ===
       sourceHash &&
@@ -669,7 +684,7 @@ async function syncAnnotationSource(
   }
   await updateCardSourceContent(
     rootPath,
-    located.relativePath,
+    relativePath,
     located.cardID,
     fields,
     sourceBlock,

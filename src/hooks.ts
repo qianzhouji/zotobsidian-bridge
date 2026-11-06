@@ -1,9 +1,11 @@
 import {
   createCardFromAnnotation,
-  ensureCardForAnnotation,
+  getOrCreateCardReference,
   importAllSavedAnnotations,
 } from "./services/annotation-card.ts";
 import { openMarkdownEditor } from "./services/markdown-editor.ts";
+import { checkpointEditorSessions } from "./services/editor-session.ts";
+import { recoverPendingCardDrafts } from "./services/pending-card-handoff.ts";
 import { importNativeNote } from "./services/native-note-card.ts";
 import { bindBridgePreferences } from "./services/preferences.ts";
 import {
@@ -17,6 +19,13 @@ import {
 import { showPendingCompanionRequest } from "./services/companion-pending-window.ts";
 import { initLocale } from "./utils/locale.ts";
 import {
+  attachExistingReaderPopupPrototypes,
+  attachReaderPopupPrototype,
+  detachReaderPopupPrototypes,
+  refreshReaderPopupPrototypes,
+  readerPopupDocument,
+} from "./adapters/reader-popup-prototype.ts";
+import {
   handleNotifierEvent,
   queueSourceSync,
   startSyncQueue,
@@ -26,9 +35,16 @@ import {
 let listenersRegistered = false;
 let notifierObserverID: string | null = null;
 let companionResponseTimer: ReturnType<typeof setInterval> | null = null;
+let readerAdapterTimer: ReturnType<typeof setInterval> | null = null;
+let pendingDraftRecoveryTimer: ReturnType<typeof setInterval> | null = null;
 let companionRecoveryRunning = false;
 let preferencesPaneID: string | null = null;
 let nativeNoteMenuID: string | null = null;
+let readerModeObserver: symbol | null = null;
+
+function onReaderModePreferenceChanged(): void {
+  refreshReaderPopupPrototypes();
+}
 
 async function reconcileCompanionResponses(): Promise<void> {
   const writerMode = Zotero.Prefs.get(
@@ -41,13 +57,14 @@ async function reconcileCompanionResponses(): Promise<void> {
   if (companionRecoveryRunning) return;
   companionRecoveryRunning = true;
   try {
-    await acknowledgeCompanionResponses((sourceIDs) =>
-      Promise.all(
+    await acknowledgeCompanionResponses(async (sourceIDs) => {
+      await Promise.all(
         sourceIDs.map((sourceID) =>
           queueSourceSync(sourceID, "companion-recovered", true),
         ),
-      ).then(() => undefined),
-    );
+      );
+      await recoverPendingCardDrafts(sourceIDs);
+    });
   } catch (error) {
     Zotero.debug(
       `[Zotero Obsidian Bridge] Companion recovery: ${String(error)}`,
@@ -92,7 +109,7 @@ function addPopupButton(
   editButton.style.cssText =
     "margin-inline-start: 8px; padding: 4px 8px; cursor: pointer;";
   editButton.addEventListener("click", () => {
-    void ensureCardForAnnotation(event.reader, event.params.annotation)
+    void getOrCreateCardReference(event.reader, event.params.annotation)
       .then(openMarkdownEditor)
       .catch(reportError);
   });
@@ -120,7 +137,7 @@ function onAnnotationContextMenu(
   event.append({
     label: "Edit current annotation card in Zotero",
     onCommand: () => {
-      void ensureCardForAnnotation(event.reader, {
+      void getOrCreateCardReference(event.reader, {
         id: event.params.currentID,
       })
         .then(openMarkdownEditor)
@@ -148,6 +165,15 @@ function onSidebarAnnotationHeader(
   event: _ZoteroTypes.Reader.EventParams<"renderSidebarAnnotationHeader">,
 ): void {
   addPopupButton(event);
+}
+
+function onReaderToolbar(
+  event: _ZoteroTypes.Reader.EventParams<"renderToolbar">,
+): void {
+  attachReaderPopupPrototype(
+    event.reader,
+    readerPopupDocument(event.reader, event.doc),
+  );
 }
 
 function onPrefsEvent(type: string, data: { window: Window }): void {
@@ -207,6 +233,12 @@ async function onStartup(): Promise<void> {
   registerNativeNoteMenu();
   await startSyncQueue();
   await initializeAutoEnrollment();
+  if (pendingDraftRecoveryTimer !== null)
+    clearInterval(pendingDraftRecoveryTimer);
+  pendingDraftRecoveryTimer = setInterval(() => {
+    void recoverPendingCardDrafts();
+  }, 5000);
+  void recoverPendingCardDrafts();
   if (companionResponseTimer !== null) clearInterval(companionResponseTimer);
   companionResponseTimer = setInterval(() => {
     void reconcileCompanionResponses();
@@ -238,11 +270,27 @@ async function onStartup(): Promise<void> {
     onSidebarAnnotationHeader,
     addon.data.config.addonID,
   );
+  Zotero.Reader.registerEventListener(
+    "renderToolbar",
+    onReaderToolbar,
+    addon.data.config.addonID,
+  );
+  attachExistingReaderPopupPrototypes(Zotero.Reader._readers);
+  if (readerAdapterTimer !== null) clearInterval(readerAdapterTimer);
+  // Reader tabs can be restored after Zotero reports UI readiness or replace their iframe.
+  readerAdapterTimer = setInterval(() => {
+    attachExistingReaderPopupPrototypes(Zotero.Reader._readers);
+  }, 750);
+  readerModeObserver = Zotero.Prefs.registerObserver(
+    "extensions.zotero.zoteroobsidianbridge.readerMode",
+    onReaderModePreferenceChanged,
+    true,
+  );
   listenersRegistered = true;
   addon.data.initialized = true;
 }
 
-function onShutdown(): void {
+async function onShutdown(): Promise<void> {
   if (nativeNoteMenuID) {
     Zotero.MenuManager.unregisterMenu(nativeNoteMenuID);
     nativeNoteMenuID = null;
@@ -251,17 +299,36 @@ function onShutdown(): void {
     Zotero.PreferencePanes.unregister(preferencesPaneID);
     preferencesPaneID = null;
   }
+  if (readerModeObserver) {
+    Zotero.Prefs.unregisterObserver(readerModeObserver);
+    readerModeObserver = null;
+  }
   if (companionResponseTimer !== null) {
     clearInterval(companionResponseTimer);
     companionResponseTimer = null;
+  }
+  if (pendingDraftRecoveryTimer !== null) {
+    clearInterval(pendingDraftRecoveryTimer);
+    pendingDraftRecoveryTimer = null;
+  }
+  if (readerAdapterTimer !== null) {
+    clearInterval(readerAdapterTimer);
+    readerAdapterTimer = null;
   }
   companionRecoveryRunning = false;
   if (notifierObserverID) {
     Zotero.Notifier.unregisterObserver(notifierObserverID);
     notifierObserverID = null;
   }
-  void stopSyncQueue();
+  await stopSyncQueue();
   if (listenersRegistered) {
+    try {
+      await detachReaderPopupPrototypes();
+    } catch (error) {
+      Zotero.debug(
+        `[Zotero Obsidian Bridge] Reader shutdown checkpoint failed: ${String(error)}`,
+      );
+    }
     Zotero.Reader.unregisterEventListener(
       "createAnnotationContextMenu",
       onAnnotationContextMenu,
@@ -274,7 +341,15 @@ function onShutdown(): void {
       "renderSidebarAnnotationHeader",
       onSidebarAnnotationHeader,
     );
+    Zotero.Reader.unregisterEventListener("renderToolbar", onReaderToolbar);
     listenersRegistered = false;
+  }
+  try {
+    await checkpointEditorSessions();
+  } catch (error) {
+    Zotero.debug(
+      `[Zotero Obsidian Bridge] Editor shutdown checkpoint failed: ${String(error)}`,
+    );
   }
   addon.data.alive = false;
   // @ts-expect-error Zotero does not declare the add-on's dynamic namespace key.

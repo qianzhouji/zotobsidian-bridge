@@ -11,7 +11,9 @@ npm --prefix obsidian-plugin ci
 npm run build
 npm run build:obsidian
 npm run smoke:integration
+npm run test:card-format
 npm run test:companion-protocol
+npm run test:companion-r3
 npm run verify:package
 npm run prepare:release
 ```

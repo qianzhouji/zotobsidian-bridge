@@ -48,6 +48,10 @@ import {
   openCard,
   validateVault,
 } from "./annotation-card.ts";
+import {
+  prepareReaderPopupModeChange,
+  type ReaderPopupModePreparation,
+} from "../adapters/reader-popup-prototype.ts";
 
 const preferenceRoot = "extensions.zotero.zoteroobsidianbridge";
 const companionStatusFilename = "bridge-status.json";
@@ -62,6 +66,7 @@ const syncStateMessages = {
 } as const satisfies Record<SyncTaskStatus, FluentMessageId>;
 let writerTransitionActive = false;
 let writerTransitionSource: "direct" | "companion" | null = null;
+let readerModeTransitionActive = false;
 
 function absoluteQueuePath(): string {
   const value = Zotero.Prefs.get(`${preferenceRoot}.companionQueuePath`, true);
@@ -367,6 +372,55 @@ async function changeWriterMode(
   }
 }
 
+async function changeReaderMode(
+  window: Window,
+  select: HTMLSelectElement,
+  status: HTMLElement | null,
+  nextMode: "native" | "bridge",
+): Promise<void> {
+  const root = preferenceRoot;
+  const saved = Zotero.Prefs.get(`${root}.readerMode`, true);
+  const previousMode = saved === "bridge" ? "bridge" : "native";
+  if (readerModeTransitionActive) {
+    select.value = previousMode;
+    return;
+  }
+  if (previousMode === nextMode) return;
+
+  readerModeTransitionActive = true;
+  let preparation: ReaderPopupModePreparation | null = null;
+  try {
+    if (previousMode === "bridge" && nextMode === "native") {
+      preparation = await prepareReaderPopupModeChange();
+    }
+    Zotero.Prefs.set(`${root}.readerMode`, nextMode, true);
+    preparation?.commit();
+    select.value = nextMode;
+    if (!status) return;
+    if (nextMode === "bridge") {
+      status.textContent = getString("pref-reader-bridge-enabled");
+    } else if (preparation?.status === "pending") {
+      status.textContent = getString("pref-reader-native-pending");
+    } else if (preparation?.status === "checkpointed") {
+      status.textContent = getString("pref-reader-native-checkpointed");
+    } else {
+      status.textContent = getString("pref-reader-native-clean");
+    }
+  } catch (error) {
+    preparation?.rollback();
+    select.value = previousMode;
+    if (status) {
+      status.textContent = getString("pref-reader-mode-error", {
+        args: {
+          reason: error instanceof Error ? error.message : String(error),
+        },
+      });
+    }
+  } finally {
+    readerModeTransitionActive = false;
+  }
+}
+
 export function bindVaultPathPreference(
   window: Window,
   inputID: string,
@@ -395,6 +449,12 @@ export function bindBridgePreferences(window: Window): void {
   const writerMode = window.document.getElementById(
     "zotero-prefpane-zoteroobsidianbridge-writerMode",
   ) as HTMLSelectElement | null;
+  const readerMode = window.document.getElementById(
+    "zotero-prefpane-zoteroobsidianbridge-readerMode",
+  ) as HTMLSelectElement | null;
+  const readerModeStatus = window.document.getElementById(
+    "zotero-prefpane-zoteroobsidianbridge-readerModeStatus",
+  ) as HTMLElement | null;
   const queuePath = window.document.getElementById(
     "zotero-prefpane-zoteroobsidianbridge-companionQueuePath",
   ) as HTMLInputElement | null;
@@ -452,6 +512,18 @@ export function bindBridgePreferences(window: Window): void {
         window,
         writerMode,
         writerMode.value === "companion" ? "companion" : "direct",
+      );
+    });
+  }
+  if (readerMode) {
+    const savedReaderMode = Zotero.Prefs.get(`${root}.readerMode`, true);
+    readerMode.value = savedReaderMode === "bridge" ? "bridge" : "native";
+    readerMode.addEventListener("change", () => {
+      void changeReaderMode(
+        window,
+        readerMode,
+        readerModeStatus,
+        readerMode.value === "bridge" ? "bridge" : "native",
       );
     });
   }

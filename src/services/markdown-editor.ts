@@ -1,5 +1,11 @@
 import type { AnnotationCardReference } from "./annotation-card.ts";
 import type { UserNoteContent } from "../core/note-content.ts";
+import { readFrontmatterValue } from "../core/markdown.ts";
+import {
+  readSourceMarkdown,
+  readUserNoteContent,
+} from "../core/note-content.ts";
+import { acquireEditorSession, type EditorSession } from "./editor-session.ts";
 import {
   updateCardUserContent,
   UserContentConflictError,
@@ -16,16 +22,28 @@ import type {
   EditorConflictRecoveryCopy,
   EditorDraft,
 } from "../adapters/editor-drafts.ts";
-import { readVaultFile } from "../adapters/vault-storage.ts";
+import { readVaultFile, readVaultImage } from "../adapters/vault-storage.ts";
+import {
+  CompanionPendingError,
+  getCompanionRequestOutcome,
+} from "../adapters/companion-queue.ts";
 import { getString } from "../utils/locale.ts";
+import { observeWindowClose } from "../adapters/window-close-lifecycle.ts";
+import {
+  createZoteroNoteQueryClient,
+  type NoteQueryClient,
+} from "../adapters/note-query-client.ts";
 
 export type EditorSaveResult =
   | { status: "saved" }
+  | { status: "pending"; requestId: string }
   | { status: "conflict"; current: UserNoteContent }
   | { status: "error"; message: string };
 
 export interface MarkdownEditorBridge {
+  createNoteQueryClient(): NoteQueryClient;
   readCard(): Promise<string | null>;
+  readPreviewImage(relativePath: string): Promise<Uint8Array>;
   readDraft(cardID: string): Promise<EditorDraft | null>;
   writeDraft(draft: EditorDraft): Promise<void>;
   deleteDraft(cardID: string): Promise<void>;
@@ -56,27 +74,26 @@ export interface MarkdownEditorBridge {
 
 const editorWindows = new Map<string, Window>();
 
-export function openMarkdownEditor(reference: AnnotationCardReference): void {
-  const existing = editorWindows.get(reference.cardID) as
-    | (Window & { closed?: boolean })
-    | undefined;
-  if (existing && !existing.closed) {
-    existing.focus();
-    return;
-  }
+function editorWindowKey(reference: AnnotationCardReference): string {
+  return JSON.stringify([
+    reference.vaultPath,
+    reference.cardID,
+    reference.sourceID,
+    reference.relativePath,
+  ]);
+}
 
-  const mainWindow = Zotero.getMainWindow() as Window & {
-    openDialog: (
-      url: string,
-      name: string,
-      features: string,
-      argument: AnnotationCardReference,
-      bridge: MarkdownEditorBridge,
-    ) => Window | null;
-  };
-  const url = `chrome://${addon.data.config.addonRef}/content/editor.xhtml`;
+export function createMarkdownEditorRuntime(
+  reference: AnnotationCardReference,
+): {
+  bridge: MarkdownEditorBridge;
+  session: EditorSession;
+} {
   const bridge: MarkdownEditorBridge = {
+    createNoteQueryClient: createZoteroNoteQueryClient,
     readCard: () => readVaultFile(reference.vaultPath, reference.relativePath),
+    readPreviewImage: (relativePath) =>
+      readVaultImage(reference.vaultPath, relativePath),
     readDraft: (cardID) => readEditorDraft(cardID),
     writeDraft: (draft) => writeEditorDraft(draft),
     deleteDraft: (cardID) => deleteEditorDraft(cardID),
@@ -109,28 +126,98 @@ export function openMarkdownEditor(reference: AnnotationCardReference): void {
         if (error instanceof UserContentConflictError) {
           return { status: "conflict", current: error.current };
         }
+        if (error instanceof CompanionPendingError) {
+          return { status: "pending", requestId: error.requestId };
+        }
         return { status: "error", message: String(error) };
       }
     },
     launchURL: (target) => Zotero.launchURL(target),
   };
-  const editor = mainWindow.openDialog(
-    url,
-    `zotero-obsidian-bridge-${reference.cardID}`,
-    "chrome,dialog=no,resizable,centerscreen,width=1180,height=820",
-    reference,
-    bridge,
-  );
-  if (!editor) throw new Error("Zotero could not open the Markdown editor.");
-  editorWindows.set(reference.cardID, editor);
-  editor.addEventListener(
-    "unload",
-    () => {
-      if (editorWindows.get(reference.cardID) === editor) {
-        editorWindows.delete(reference.cardID);
-      }
+  const session = acquireEditorSession(
+    {
+      vaultPath: reference.vaultPath,
+      cardID: reference.cardID,
+      sourceID: reference.sourceID,
+      relativePath: reference.relativePath,
     },
-    { once: true },
+    {
+      async readDisk() {
+        const markdown = await bridge.readCard();
+        if (markdown === null) {
+          throw new Error("The linked card no longer exists.");
+        }
+        if (
+          readFrontmatterValue(markdown, "bridge_card_id") !== reference.cardID
+        ) {
+          throw new Error(
+            "Card identity changed; the editor is now read-only.",
+          );
+        }
+        return {
+          content: readUserNoteContent(markdown),
+          source: readSourceMarkdown(markdown),
+        };
+      },
+      readDraft: (cardID) => bridge.readDraft(cardID),
+      writeDraft: (draft) => bridge.writeDraft(draft),
+      deleteDraft: (cardID) => bridge.deleteDraft(cardID),
+      save: (baseline, next, force) =>
+        bridge.saveUserContent(baseline, next, force),
+      getSaveOutcome: (requestId) => getCompanionRequestOutcome(requestId),
+    },
   );
+  return { bridge, session };
+}
+
+export function openMarkdownEditor(
+  reference: AnnotationCardReference,
+): EditorSession {
+  const { bridge, session } = createMarkdownEditorRuntime(reference);
+  const key = editorWindowKey(reference);
+  const existing = editorWindows.get(key) as
+    | (Window & { closed?: boolean })
+    | undefined;
+  if (existing && !existing.closed) {
+    existing.focus();
+    return session;
+  }
+
+  const mainWindow = Zotero.getMainWindow() as Window & {
+    openDialog: (
+      url: string,
+      name: string,
+      features: string,
+      argument: AnnotationCardReference,
+      bridge: MarkdownEditorBridge,
+      session: EditorSession,
+    ) => Window | null;
+  };
+  const url = `chrome://${addon.data.config.addonRef}/content/editor.html`;
+  const releaseSession = session.retain();
+  let editor: Window | null;
+  try {
+    editor = mainWindow.openDialog(
+      url,
+      `zotero-obsidian-bridge-${reference.cardID}`,
+      "chrome,dialog=no,resizable,centerscreen,width=1180,height=820",
+      reference,
+      bridge,
+      session,
+    );
+  } catch (error) {
+    releaseSession();
+    throw error;
+  }
+  if (!editor) {
+    releaseSession();
+    throw new Error("Zotero could not open the Markdown editor.");
+  }
+  editorWindows.set(key, editor);
+  observeWindowClose(editor, url, () => {
+    if (editorWindows.get(key) === editor) editorWindows.delete(key);
+    releaseSession();
+  });
   editor.focus();
+  return session;
 }

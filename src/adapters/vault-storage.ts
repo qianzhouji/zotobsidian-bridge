@@ -1,5 +1,8 @@
 import { readFrontmatterValue } from "../core/markdown.ts";
-import { sha256Bytes } from "../core/image-resource.ts";
+import {
+  MAX_IMAGE_RESOURCE_BYTES,
+  sha256Bytes,
+} from "../core/image-resource.ts";
 import type {
   CardIndex,
   CardIndexEntry,
@@ -8,6 +11,7 @@ import type {
 } from "../core/models.ts";
 import {
   submitCompanionResource,
+  submitCompanionMove,
   submitCompanionWrite,
 } from "./companion-queue.ts";
 import {
@@ -225,6 +229,26 @@ export async function readVaultFile(
   return IOUtils.readUTF8(path);
 }
 
+export async function readVaultImage(
+  rootPath: string,
+  relativePath: string,
+): Promise<Uint8Array> {
+  const path = resolveVaultPath(rootPath, relativePath);
+  await rejectSymlinkComponents(rootPath, relativePath);
+  if (!(await IOUtils.exists(path))) {
+    throw new Error("The local image is missing from the configured Vault.");
+  }
+  const info = await IOUtils.stat(path);
+  if (
+    typeof info.size !== "number" ||
+    info.size <= 0 ||
+    info.size > MAX_IMAGE_RESOURCE_BYTES
+  ) {
+    throw new Error("The local image is empty or exceeds the preview limit.");
+  }
+  return IOUtils.read(path, { maxBytes: MAX_IMAGE_RESOURCE_BYTES });
+}
+
 export async function createExclusiveVaultFile(
   rootPath: string,
   relativePath: string,
@@ -264,6 +288,73 @@ export async function createExclusiveVaultFile(
       }
       throw error;
     }
+  });
+}
+
+export async function moveVaultFile(
+  rootPath: string,
+  oldRelativePath: string,
+  newRelativePath: string,
+  cardID: string,
+  sourceID: string,
+): Promise<void> {
+  return trackVaultWrite(async () => {
+    const oldPath = resolveVaultPath(rootPath, oldRelativePath);
+    const newPath = resolveVaultPath(rootPath, newRelativePath);
+    await rejectSymlinkComponents(rootPath, oldRelativePath);
+    await rejectSymlinkComponents(rootPath, newRelativePath);
+
+    const contents = await readVaultFile(rootPath, oldRelativePath);
+    const destination = await readVaultFile(rootPath, newRelativePath);
+    if (contents === null) {
+      if (destination !== null) {
+        const identity = companionIdentity(destination);
+        if (identity.cardId === cardID && identity.sourceId === sourceID)
+          return;
+      }
+      throw new Error(`Cannot rename missing card: ${oldRelativePath}`);
+    }
+    const identity = companionIdentity(contents);
+    if (identity.cardId !== cardID || identity.sourceId !== sourceID) {
+      throw new Error("Card identity changed; refusing to rename this file.");
+    }
+    if (destination !== null) {
+      throw new Error(
+        `A file already exists at ${newRelativePath}; it was not overwritten.`,
+      );
+    }
+
+    if (currentWriterMode() === "companion") {
+      await submitCompanionMove({
+        cardId: cardID,
+        sourceId: sourceID,
+        targetVaultId: companionVaultId(),
+        outputFolder: companionOutputFolder(),
+        relativePath: newRelativePath,
+        moveFromRelativePath: oldRelativePath,
+        baseRevision: await sha256Text(contents),
+        content: contents,
+      });
+      return;
+    }
+
+    const parentRelative = newRelativePath.split("/").slice(0, -1).join("/");
+    await ensureVaultDirectory(rootPath, parentRelative);
+    await rejectSymlinkComponents(rootPath, oldRelativePath);
+    await rejectSymlinkComponents(rootPath, newRelativePath);
+    if (!(await IOUtils.exists(oldPath))) {
+      throw new Error(`Card changed before rename: ${oldRelativePath}`);
+    }
+    if (await IOUtils.exists(newPath)) {
+      throw new Error(
+        `A file already exists at ${newRelativePath}; it was not overwritten.`,
+      );
+    }
+    const current = await IOUtils.readUTF8(oldPath);
+    if (current !== contents) {
+      throw new Error(`Card changed before rename: ${oldRelativePath}`);
+    }
+    await IOUtils.move(oldPath, newPath, { noOverwrite: true });
   });
 }
 

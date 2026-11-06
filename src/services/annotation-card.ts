@@ -1,4 +1,5 @@
 import {
+  createMarkdownWithHiddenMetadata,
   createMarkdownWithFrontmatter,
   formatSourceBlock,
   formatPaperSourceBlock,
@@ -7,7 +8,6 @@ import {
 import {
   annotationSourceID,
   libraryIdentityKey,
-  safePathSegment,
   validateVaultRelativePath,
 } from "../core/models.ts";
 import {
@@ -40,6 +40,11 @@ import { exportAnnotationImage } from "./image-assets.ts";
 import { updateCardSourceContent } from "./card-updater.ts";
 import { CompanionPendingError } from "../adapters/companion-queue.ts";
 import { showPendingCompanionRequest } from "./companion-pending-window.ts";
+import {
+  annotationCardPath,
+  migrateLegacyAnnotationCardPath,
+  relativePaperDirectory,
+} from "./annotation-card-path.ts";
 
 type AnnotationPayload = Partial<_ZoteroTypes.Annotations.AnnotationJson> & {
   id?: string;
@@ -391,7 +396,10 @@ function buildCardMarkdown(
 ): string {
   const { paper, annotation } = card;
   const sourceBlock = buildAnnotationSourceBlock(annotation, imagePath);
-  return createMarkdownWithFrontmatter(
+  return createMarkdownWithHiddenMetadata(
+    {
+      paper_title: paper.title,
+    },
     {
       type: "zotero-annotation",
       bridge_schema: 1,
@@ -403,7 +411,6 @@ function buildCardMarkdown(
       zotero_library: libraryIdentityKey(annotation.identity),
       zotero_library_id: annotation.identity.typeID,
       zotero_paper_key: paper.key,
-      zotero_paper_title: paper.title,
       zotero_creator: paper.creator || null,
       zotero_date: paper.date || null,
       zotero_publication: paper.publication || null,
@@ -416,7 +423,7 @@ function buildCardMarkdown(
       zotero_uri: annotation.zoteroURI,
       note_title: null,
     },
-    `${sourceBlock}\n## My notes\n\n`,
+    `## My notes\n\n${sourceBlock}`,
   );
 }
 
@@ -440,19 +447,6 @@ function buildPaperMarkdown(paper: PaperRecord): string {
     },
     `${formatPaperSourceBlock(paper.title, paper.zoteroURI)}\n## Reading notes\n\n`,
   );
-}
-
-function relativePaperDirectory(
-  outputFolder: string,
-  paper: PaperRecord,
-): string {
-  const libraryKey = safePathSegment(
-    libraryIdentityKey(paper.identity).replace(":", "-"),
-    "library",
-  );
-  const itemKey = safePathSegment(paper.key, "item");
-  const paperFolder = `${safePathSegment(paper.title, "Untitled paper")} (${libraryKey}-${itemKey})`;
-  return `${outputFolder}/${paperFolder}`;
 }
 
 function assertMatchingCard(
@@ -629,12 +623,19 @@ async function createOrOpenCard(
       annotationSourceFields(paper, sourceAnnotation, sourceHash),
       buildAnnotationSourceBlock(sourceAnnotation, image?.markdownPath),
     );
-    index.cards[sourceID] = makeIndexEntry(
-      existing.cardID,
+    const relativePath = await migrateLegacyAnnotationCardPath(
+      vaultPath,
+      outputFolder,
+      paper,
+      sourceAnnotation,
       existing.relativePath,
+      existing.cardID,
+      sourceID,
     );
+    index.cards[sourceID] = makeIndexEntry(existing.cardID, relativePath);
+    batchContext?.discoveredSources.set(sourceID, [relativePath]);
     await persistCardIndexChange(indexPath, index, batchContext);
-    return existing.relativePath;
+    return relativePath;
   }
 
   await ensureVaultDirectory(vaultPath, outputFolder);
@@ -656,7 +657,14 @@ async function createOrOpenCard(
   }
 
   const cardID = crypto.randomUUID();
-  const relativePath = `${paperDirectory}/Annotations/${safePathSegment(annotation.key, "annotation")}.md`;
+  const relativePath = await annotationCardPath(
+    vaultPath,
+    outputFolder,
+    paper,
+    sourceAnnotation,
+    undefined,
+    sourceID,
+  );
   const card: CardRecord = {
     id: cardID,
     sourceID,
@@ -731,6 +739,75 @@ export interface AnnotationCardReference {
   paperTitle: string;
   paperCreator: string;
   zoteroURI: string;
+  annotationColor?: string;
+}
+
+export async function getExistingCardReference(
+  annotation: Zotero.Item,
+): Promise<AnnotationCardReference | null> {
+  if (!annotation.isAnnotation() || annotation.deleted) return null;
+  const vaultPath = getVaultPath();
+  if (!vaultPath || !PathUtils.isAbsolute(vaultPath)) return null;
+  const attachment = annotation.parentItem;
+  if (!attachment || !attachment.isAttachment()) return null;
+
+  const identity = getLibraryIdentity(annotation.libraryID);
+  const paper = paperRecord(
+    attachment,
+    attachment.parentItemID
+      ? await Zotero.Items.getAsync(attachment.parentItemID)
+      : null,
+    identity,
+  );
+  const sourceAnnotation = annotationRecord(annotation, attachment, identity);
+  const sourceID = annotationSourceID(identity, annotation.key);
+  const index = await readCardIndex(getIndexPath());
+  const indexed = index.cards[sourceID];
+  if (!indexed) return null;
+
+  const markdown = await readVaultFile(vaultPath, indexed.relativePath);
+  if (markdown === null) return null;
+  assertMatchingCard(markdown, indexed.cardID, sourceID);
+  const zoteroURI = readFrontmatterValue(markdown, "zotero_uri");
+  if (typeof zoteroURI !== "string" || !zoteroURI) return null;
+
+  return {
+    cardID: indexed.cardID,
+    sourceID,
+    vaultPath,
+    relativePath: indexed.relativePath,
+    absolutePath: resolveVaultPath(vaultPath, indexed.relativePath),
+    paperTitle: String(
+      readFrontmatterValue(markdown, "zotero_paper_title") ?? paper.title,
+    ),
+    paperCreator: String(
+      readFrontmatterValue(markdown, "zotero_creator") ?? paper.creator,
+    ),
+    zoteroURI,
+    annotationColor: String(
+      readFrontmatterValue(markdown, "zotero_annotation_color") ??
+        sourceAnnotation.color ??
+        "",
+    ),
+  };
+}
+
+export async function getOrCreateCardReference(
+  reader: _ZoteroTypes.ReaderInstance,
+  payload: AnnotationPayload,
+): Promise<AnnotationCardReference> {
+  const annotation = await resolveAnnotation(reader, payload);
+  if (!annotation) {
+    throw new Error(
+      "No saved annotation was found. Save the highlight in Zotero first.",
+    );
+  }
+  const existing = await getExistingCardReference(annotation);
+  if (existing) return existing;
+  return ensureCardForAnnotation(reader, {
+    key: annotation.key,
+    libraryID: annotation.libraryID,
+  });
 }
 
 export async function ensureCardForAnnotation(
@@ -787,6 +864,7 @@ export async function ensureCardForAnnotation(
         paperTitle: paper.title,
         paperCreator: paper.creator,
         zoteroURI: sourceAnnotation.zoteroURI,
+        annotationColor: sourceAnnotation.color,
       };
       return;
     }
@@ -818,6 +896,11 @@ export async function ensureCardForAnnotation(
         readFrontmatterValue(markdown, "zotero_creator") ?? "",
       ),
       zoteroURI,
+      annotationColor: String(
+        readFrontmatterValue(markdown, "zotero_annotation_color") ??
+          sourceAnnotation.color ??
+          "",
+      ),
     };
   });
   if (!reference) throw new Error("Could not resolve the annotation card.");
@@ -1011,16 +1094,29 @@ export async function createCardFromAnnotation(
     return createLocks.get(knownSource)!;
   }
 
-  const operation = enqueueCardOperation(async () => {
+  const operation = (async () => {
     const annotation = await resolveAnnotation(reader, payload, selectedIDs);
     if (!annotation) {
       throw new Error(
         "No saved annotation was found. Save the highlight in Zotero first.",
       );
     }
-    const relativePath = await createOrOpenCard(annotation);
-    await openCard(getVaultPath(), relativePath);
-  });
+    const existing = await getExistingCardReference(annotation);
+    if (existing) {
+      await openCard(existing.vaultPath, existing.relativePath);
+      let refreshedPath = existing.relativePath;
+      await enqueueCardOperation(async () => {
+        refreshedPath = await createOrOpenCard(annotation);
+      });
+      if (refreshedPath !== existing.relativePath)
+        await openCard(existing.vaultPath, refreshedPath);
+      return;
+    }
+    await enqueueCardOperation(async () => {
+      const relativePath = await createOrOpenCard(annotation);
+      await openCard(getVaultPath(), relativePath);
+    });
+  })();
   if (knownSource) createLocks.set(knownSource, operation);
   try {
     await operation;

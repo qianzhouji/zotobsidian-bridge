@@ -2,6 +2,7 @@ import {
   readFrontmatterValue,
   replacePaperSourceBlock,
   replaceSourceBlock,
+  updateAnnotationCardMetadata,
   updateBridgeFrontmatter,
 } from "../core/markdown.ts";
 import {
@@ -16,6 +17,15 @@ import {
 import type { UserNoteContent } from "../core/note-content.ts";
 
 const cardWriteTails = new Map<string, Promise<void>>();
+
+function updateCardMetadata(
+  markdown: string,
+  updates: Record<string, unknown>,
+): string {
+  return readFrontmatterValue(markdown, "type") === "zotero-annotation"
+    ? updateAnnotationCardMetadata(markdown, updates)
+    : updateBridgeFrontmatter(markdown, updates);
+}
 
 function serializeCardWrite<T>(
   vaultPath: string,
@@ -49,7 +59,7 @@ export function updateCardSourceFields(
       throw new Error("Card identity changed; refusing to write to this file.");
     }
 
-    const updated = updateBridgeFrontmatter(current, {
+    const updated = updateCardMetadata(current, {
       ...sourceFields,
       bridge_updated_at: new Date().toISOString(),
     });
@@ -72,7 +82,11 @@ export function updateCardSourceContent(
     }
 
     const withSource = replaceSourceBlock(current, sourceBlock);
-    const updated = updateBridgeFrontmatter(withSource, {
+    const reordered =
+      readFrontmatterValue(current, "type") === "zotero-annotation"
+        ? replaceUserNoteContent(withSource, readUserNoteContent(withSource))
+        : withSource;
+    const updated = updateCardMetadata(reordered, {
       ...sourceFields,
       bridge_updated_at: new Date().toISOString(),
     });

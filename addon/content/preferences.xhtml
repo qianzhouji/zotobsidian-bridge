@@ -51,6 +51,31 @@
       ></html:option>
     </html:select>
   </hbox>
+  <groupbox xmlns:html="http://www.w3.org/1999/xhtml">
+    <caption data-l10n-id="pref-reader-title"></caption>
+    <hbox>
+      <html:label
+        for="zotero-prefpane-__addonRef__-readerMode"
+        data-l10n-id="pref-reader-mode"
+      ></html:label>
+      <html:select id="zotero-prefpane-__addonRef__-readerMode">
+        <html:option
+          value="native"
+          data-l10n-id="pref-reader-native"
+        ></html:option>
+        <html:option
+          value="bridge"
+          data-l10n-id="pref-reader-bridge"
+        ></html:option>
+      </html:select>
+    </hbox>
+    <html:p data-l10n-id="pref-reader-description"></html:p>
+    <html:span
+      id="zotero-prefpane-__addonRef__-readerModeStatus"
+      role="status"
+      aria-live="polite"
+    ></html:span>
+  </groupbox>
   <hbox>
     <html:label
       for="zotero-prefpane-__addonRef__-companionQueuePath"

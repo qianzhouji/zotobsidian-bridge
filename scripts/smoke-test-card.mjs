@@ -25,11 +25,7 @@ const expectedFolder = path.join(
   "Neural Mass Model Alpha (user-0-PAPER01)",
 );
 const paperPath = path.join(expectedFolder, "Paper.md");
-const annotationPath = path.join(
-  expectedFolder,
-  "Annotations",
-  `${annotationKey}.md`,
-);
+const annotationPath = path.join(expectedFolder, "Annotations", "P03N01.md");
 
 await fs.rm(vaultPath, { recursive: true, force: true });
 await fs.rm(dataPath, { recursive: true, force: true });
@@ -128,7 +124,7 @@ const batchAnnotation = {
   libraryID: 1,
   parentItem: attachment,
   isAnnotation: () => true,
-  annotationPosition: JSON.stringify({ pageIndex: 5 }),
+  annotationPosition: JSON.stringify({ pageIndex: 2 }),
   annotationPageLabel: "6",
   annotationText: "A second selected highlight.",
   annotationComment: "Batch-created comment.",
@@ -456,12 +452,15 @@ globalThis.addon = {
 const {
   cancelAnnotationBatch,
   createCardFromAnnotation,
+  enqueueCardOperation,
   importAllSavedAnnotations,
 } = await import("../src/services/annotation-card.ts");
 const { updateCardSourceFields } =
   await import("../src/services/card-updater.ts");
 const { parseMarkdownFrontmatter, readFrontmatterValue, replaceSourceBlock } =
   await import("../src/core/markdown.ts");
+const { readSourceMarkdown, readUserNoteContent, replaceUserNoteContent } =
+  await import("../src/core/note-content.ts");
 const { resolveVaultPath, readCardIndex, writeCardIndex } =
   await import("../src/adapters/vault-storage.ts");
 const { findCardByFrontmatter } =
@@ -492,10 +491,15 @@ prefs.delete("extensions.zotero.zoteroobsidianbridge.writerMode");
 
 await createCardFromAnnotation({}, { key: annotationKey, libraryID: 1 });
 let card = await fs.readFile(annotationPath, "utf8");
-card = card.replace(
-  "type: zotero-annotation\n",
-  "type: zotero-annotation\ncustom_metadata:\n  owner: me\n  flags: [keep, exact]\n",
-);
+assert.deepEqual(Object.keys(parseMarkdownFrontmatter(card).document.toJS()), [
+  "paper_title",
+]);
+const initialParsedCard = parseMarkdownFrontmatter(card);
+initialParsedCard.document.set("custom_metadata", {
+  owner: "me",
+  flags: ["keep", "exact"],
+});
+card = `---\n${initialParsedCard.document.toString({ lineWidth: 0 })}---${initialParsedCard.body}`;
 card += "\n```md\n<!-- zotero-obsidian-bridge:source:start -->\n````\n";
 await fs.writeFile(annotationPath, card, "utf8");
 const initialCard = card;
@@ -520,6 +524,24 @@ const sourceID = readFrontmatterValue(card, "bridge_source_id");
 assert.equal(typeof cardID, "string");
 assert.equal(sourceID, "user:0/annotation/ANN001");
 
+const legacyFilenamePath = path.join(
+  expectedFolder,
+  "Annotations",
+  `${annotationKey}.md`,
+);
+await fs.rename(annotationPath, legacyFilenamePath);
+await createCardFromAnnotation({}, { key: annotationKey, libraryID: 1 });
+assert.equal(await exists(legacyFilenamePath), false);
+assert.equal(await exists(annotationPath), true);
+card = await fs.readFile(annotationPath, "utf8");
+assert.equal(readFrontmatterValue(card, "bridge_card_id"), cardID);
+assert.equal(readFrontmatterValue(card, "bridge_source_id"), sourceID);
+assert.deepEqual(readFrontmatterValue(card, "custom_metadata"), {
+  owner: "me",
+  flags: ["keep", "exact"],
+});
+assert.equal(launchedURLs.length, 2);
+
 const duplicateSourcePath = path.join(
   expectedFolder,
   "Annotations",
@@ -537,7 +559,7 @@ await assert.rejects(
 );
 await fs.rm(duplicateSourcePath);
 
-const bodyBefore = parseMarkdownFrontmatter(card).body;
+const userNoteBefore = readUserNoteContent(card);
 await updateCardSourceFields(
   vaultPath,
   path.relative(vaultPath, annotationPath),
@@ -548,7 +570,7 @@ await updateCardSourceFields(
 );
 card = await fs.readFile(annotationPath, "utf8");
 assert.equal(readFrontmatterValue(card, "zotero_doi"), "10.0000/updated");
-assert.equal(parseMarkdownFrontmatter(card).body, bodyBefore);
+assert.deepEqual(readUserNoteContent(card), userNoteBefore);
 assert.deepEqual(readFrontmatterValue(card, "custom_metadata"), {
   owner: "me",
   flags: ["keep", "exact"],
@@ -559,10 +581,13 @@ const recoveryPath = path.join(
   ".bridge-recovery",
 );
 const recoveryFiles = await fs.readdir(recoveryPath);
-assert.equal(recoveryFiles.length, 1);
-assert.equal(
-  await fs.readFile(path.join(recoveryPath, recoveryFiles[0]), "utf8"),
-  initialCard,
+assert.ok(recoveryFiles.length >= 1);
+assert.ok(
+  await Promise.all(
+    recoveryFiles.map((name) =>
+      fs.readFile(path.join(recoveryPath, name), "utf8"),
+    ),
+  ).then((revisions) => revisions.includes(initialCard)),
 );
 
 const updatedCard = card;
@@ -678,13 +703,55 @@ assert.match(
   refreshedCard,
   /```md\n<!-- zotero-obsidian-bridge:source:start -->\n````/,
 );
-assert.equal(launchedURLs.length, 10);
+assert.equal(launchedURLs.length, 11);
 assert.equal(
   (await fs.readdir(path.join(expectedFolder, "Annotations"))).filter((name) =>
     name.endsWith(".md"),
   ).length,
   1,
 );
+
+let startQuickOpenGate;
+let releaseQuickOpenGate;
+const quickOpenGateStarted = new Promise((resolve) => {
+  startQuickOpenGate = resolve;
+});
+const quickOpenGateWait = new Promise((resolve) => {
+  releaseQuickOpenGate = resolve;
+});
+const blockedQueueOperation = enqueueCardOperation(async () => {
+  startQuickOpenGate();
+  await quickOpenGateWait;
+});
+await withTimeout(
+  quickOpenGateStarted,
+  5000,
+  "Timed out waiting for the card-operation queue blocker",
+);
+const urlsBeforeQueuedOpen = launchedURLs.length;
+quote = "Source update after queued open";
+const existingCardOpen = createCardFromAnnotation(
+  {},
+  { key: annotationKey, libraryID: 1 },
+);
+await withTimeout(
+  (async () => {
+    while (launchedURLs.length === urlsBeforeQueuedOpen) {
+      await new Promise((resolve) => setTimer(resolve, 5));
+    }
+  })(),
+  1000,
+  "Existing card did not open while the source-update queue was blocked",
+);
+assert.equal(launchedURLs.length, urlsBeforeQueuedOpen + 1);
+releaseQuickOpenGate();
+await withTimeout(
+  Promise.all([blockedQueueOperation, existingCardOpen]),
+  10000,
+  "Timed out waiting for queued existing-card source updates",
+);
+const quickOpenedCard = await fs.readFile(annotationPath, "utf8");
+assert.match(quickOpenedCard, /> Source update after queued open/);
 
 const movedPath = path.join(expectedFolder, "Annotations", "renamed card.md");
 await fs.rename(annotationPath, movedPath);
@@ -705,6 +772,12 @@ const indexPath = path.join(
   "zotero-obsidian-bridge",
   "cards.json",
 );
+const indexedAnnotationPath = async (key) => {
+  const index = await readCardIndex(indexPath);
+  const entry = index.cards[`user:0/annotation/${key}`];
+  assert.ok(entry, `Expected an indexed card for annotation ${key}`);
+  return path.join(vaultPath, entry.relativePath);
+};
 let suspendedIndex = await readCardIndex(indexPath);
 assert.equal(
   suspendedIndex.suspendedCards["user:0/annotation/ANN001"].cardID,
@@ -726,7 +799,7 @@ const secondLibraryCard = path.join(
   literaturePath,
   "Neural Mass Model Alpha (group-77-PAPER01)",
   "Annotations",
-  `${annotationKey}.md`,
+  "P03N01.md",
 );
 assert.equal(await exists(secondLibraryCard), true);
 assert.equal(
@@ -762,17 +835,14 @@ assert.equal(
   path.relative(vaultPath, secondLibraryCard),
 );
 
-const selectedCardPath = path.join(
-  expectedFolder,
-  "Annotations",
-  "ANNBATCH.md",
-);
 const urlsBeforeBatch = launchedURLs.length;
 await createCardFromAnnotation(
   { itemID: attachment.id },
   { id: String(batchAnnotation.id) },
   [String(annotation.id), String(batchAnnotation.id)],
 );
+const selectedCardPath = await indexedAnnotationPath("ANNBATCH");
+assert.equal(path.basename(selectedCardPath), "P03N10.md");
 assert.equal(await exists(selectedCardPath), true);
 assert.match(
   await fs.readFile(selectedCardPath, "utf8"),
@@ -871,11 +941,19 @@ registerSyncRecord("ANNBATCH", 1, 220, {
   pageIndex: 5,
 });
 
+function userNotes(markdown) {
+  const body = parseMarkdownFrontmatter(markdown).body;
+  const notesStart = body.indexOf("## My notes");
+  const sourceStart = body.indexOf(
+    "<!-- zotero-obsidian-bridge:source:start -->",
+  );
+  return body.slice(notesStart, sourceStart >= 0 ? sourceStart : body.length);
+}
+
 let syncCard = await fs.readFile(movedPath, "utf8");
 syncCard += "\nPersonal note that must survive source synchronization.\n";
 await fs.writeFile(movedPath, syncCard, "utf8");
-const personalBody = parseMarkdownFrontmatter(syncCard).body;
-const userNotesBefore = personalBody.slice(personalBody.indexOf("## My notes"));
+const userNotesBefore = userNotes(syncCard);
 syncMode = true;
 
 const {
@@ -886,18 +964,100 @@ const {
   startSyncQueue,
   stopSyncQueue,
 } = await import("../src/services/sync-queue.ts");
-const userNotes = (markdown) => {
-  const body = parseMarkdownFrontmatter(markdown).body;
-  return body.slice(body.indexOf("## My notes"));
-};
 await startSyncQueue();
 await flushSyncQueue();
 let syncStatus = await getSyncStatus();
 assert.equal(syncStatus.counts.conflict, 0);
 assert.equal(syncStatus.counts.retry, 0);
 assert.equal(syncStatus.counts.pending, 0);
+
+const migrationSourceID = "user:0/annotation/ANN002";
+const migrationCurrentPath = await indexedAnnotationPath("ANN002");
+const migrationLegacyPath = path.join(
+  path.dirname(migrationCurrentPath),
+  "ANN002.md",
+);
+Object.assign(syncFieldsByKey.get("1:ANN002"), {
+  annotationText: "Independent annotation 2",
+  annotationComment: "Check this claim against the source.",
+  annotationColor: "#ffd400",
+  annotationPageLabel: "3",
+  pageIndex: 2,
+});
+await queueSourceSync(migrationSourceID, "modify");
+await flushSyncQueue();
+let migrationIndex = await readCardIndex(indexPath);
+const migrationEntry = migrationIndex.cards[migrationSourceID];
+const initialMigrationCard = await fs.readFile(migrationCurrentPath, "utf8");
+assert.ok(initialMigrationCard.includes("## My notes\n"));
+const migrationCardBefore = initialMigrationCard.replace(
+  "## My notes\n",
+  "## My notes\nMigration note must survive.\n",
+);
+await fs.writeFile(migrationCurrentPath, migrationCardBefore, "utf8");
+const migrationCardID = readFrontmatterValue(
+  migrationCardBefore,
+  "bridge_card_id",
+);
+const migrationSourceHash = readFrontmatterValue(
+  migrationCardBefore,
+  "bridge_source_hash",
+);
+await fs.rename(migrationCurrentPath, migrationLegacyPath);
+migrationIndex.cards[migrationSourceID] = {
+  ...migrationEntry,
+  relativePath: path.relative(vaultPath, migrationLegacyPath),
+};
+await writeCardIndex(indexPath, migrationIndex);
+await queueSourceSync(migrationSourceID, "modify");
+await flushSyncQueue();
+const migrationNumberedPath = await indexedAnnotationPath("ANN002");
+assert.equal(path.basename(migrationNumberedPath), "P03N01.md");
+assert.equal(await exists(migrationLegacyPath), false);
+const migratedSyncCard = await fs.readFile(migrationNumberedPath, "utf8");
+assert.equal(
+  readFrontmatterValue(migratedSyncCard, "bridge_card_id"),
+  migrationCardID,
+);
+assert.equal(
+  readFrontmatterValue(migratedSyncCard, "bridge_source_hash"),
+  migrationSourceHash,
+);
+assert.match(migratedSyncCard, /Independent annotation 2/);
+
+// Path-only migration must run even when the source hash itself is unchanged.
+const sameHashLegacyPath = path.join(
+  path.dirname(migrationNumberedPath),
+  "ANN002.md",
+);
+await fs.rename(migrationNumberedPath, sameHashLegacyPath);
+migrationIndex.cards[migrationSourceID] = {
+  ...migrationIndex.cards[migrationSourceID],
+  relativePath: path.relative(vaultPath, sameHashLegacyPath),
+};
+await writeCardIndex(indexPath, migrationIndex);
+await queueSourceSync(migrationSourceID, "modify");
+await flushSyncQueue();
+const sameHashMigratedPath = await indexedAnnotationPath("ANN002");
+assert.equal(sameHashMigratedPath, migrationNumberedPath);
+assert.equal(await exists(sameHashLegacyPath), false);
+const sameHashMigratedCard = await fs.readFile(sameHashMigratedPath, "utf8");
+assert.equal(
+  readFrontmatterValue(sameHashMigratedCard, "bridge_card_id"),
+  migrationCardID,
+);
+assert.equal(
+  readFrontmatterValue(sameHashMigratedCard, "bridge_source_hash"),
+  migrationSourceHash,
+);
+assert.match(sameHashMigratedCard, /Migration note must survive\./);
+
 syncCard = await fs.readFile(movedPath, "utf8");
 assert.equal(userNotes(syncCard), userNotesBefore);
+assert.match(
+  syncCard,
+  /Personal note that must survive source synchronization\./,
+);
 
 currentPaperTitle = "Updated Neural Mass Model";
 handleNotifierEvent("modify", "item", [parent.id], null);
@@ -970,7 +1130,7 @@ assert.equal(
 assert.match(syncCard, /Restored Zotero source text\./);
 assert.equal(userNotes(syncCard), userNotesBefore);
 
-const removedCardPath = path.join(expectedFolder, "Annotations", "ANN002.md");
+const removedCardPath = await indexedAnnotationPath("ANN002");
 await fs.rm(removedCardPath);
 await queueSourceSync("user:0/annotation/ANN002", "modify");
 await flushSyncQueue();
@@ -1003,7 +1163,7 @@ assert.ok(
 );
 failAtomicWrite = false;
 await flushSyncQueue();
-const retryCardPath = path.join(expectedFolder, "Annotations", "ANN003.md");
+const retryCardPath = await indexedAnnotationPath("ANN003");
 assert.match(
   await fs.readFile(retryCardPath, "utf8"),
   /A source update that will fail once\./,
@@ -1015,15 +1175,13 @@ await queueSourceSync("user:0/annotation/ANN004", "modify");
 await stopSyncQueue();
 await startSyncQueue();
 await flushSyncQueue();
-const resumedCardPath = path.join(expectedFolder, "Annotations", "ANN004.md");
+const resumedCardPath = await indexedAnnotationPath("ANN004");
 assert.match(
   await fs.readFile(resumedCardPath, "utf8"),
   /Persisted pending task after restart\./,
 );
 await stopSyncQueue();
 
-const { readSourceMarkdown, readUserNoteContent, replaceUserNoteContent } =
-  await import("../src/core/note-content.ts");
 const { renderMarkdown } = await import("../src/core/markdown-preview.ts");
 const { formatLineDiff } = await import("../src/core/text-diff.ts");
 const {
@@ -1210,7 +1368,7 @@ await createCardFromAnnotation(
 assert.equal(launchedURLs.length, urlsBeforeLargeBatch + 1);
 assert.equal(
   new URL(launchedURLs.at(-1)).searchParams.get("path"),
-  path.join(largeBatchFolder, "Annotations", "LOAD001.md"),
+  await indexedAnnotationPath("LOAD001"),
 );
 const largeBatchFiles = await fs.readdir(
   path.join(largeBatchFolder, "Annotations"),
@@ -1222,10 +1380,7 @@ assert.equal(
 const loadTestCardIDs = new Set();
 for (let index = 0; index < largeBatchAnnotations.length; index++) {
   const key = `LOAD${String(index + 1).padStart(3, "0")}`;
-  const markdown = await fs.readFile(
-    path.join(largeBatchFolder, "Annotations", `${key}.md`),
-    "utf8",
-  );
+  const markdown = await fs.readFile(await indexedAnnotationPath(key), "utf8");
   assert.equal(
     readFrontmatterValue(markdown, "bridge_source_id"),
     `user:0/annotation/${key}`,
@@ -1268,24 +1423,20 @@ const historicalAnnotations = Array.from({ length: 4 }, (_, index) => ({
   annotationColor: "#ffd400",
 }));
 savedAnnotations = historicalAnnotations;
-const historicalFolder = path.join(largeBatchFolder, "Annotations");
 await importAllSavedAnnotations(
   { itemID: attachment.id },
   String(historicalAnnotations[1].id),
 );
 assert.match(confirmations.at(-1), /Import 4 saved annotations/);
 assert.equal(
-  (await fs.readdir(historicalFolder)).filter(
-    (name) => name.startsWith("HIST") && name.endsWith(".md"),
+  Object.keys((await readCardIndex(indexPath)).cards).filter((sourceID) =>
+    sourceID.startsWith("user:0/annotation/HIST"),
   ).length,
   historicalAnnotations.length,
 );
 const firstImportCardIDs = new Set();
 for (const item of historicalAnnotations) {
-  const note = await fs.readFile(
-    path.join(historicalFolder, `${item.key}.md`),
-    "utf8",
-  );
+  const note = await fs.readFile(await indexedAnnotationPath(item.key), "utf8");
   firstImportCardIDs.add(readFrontmatterValue(note, "bridge_card_id"));
 }
 await importAllSavedAnnotations(
@@ -1294,10 +1445,7 @@ await importAllSavedAnnotations(
 );
 const secondImportCardIDs = new Set();
 for (const item of historicalAnnotations) {
-  const note = await fs.readFile(
-    path.join(historicalFolder, `${item.key}.md`),
-    "utf8",
-  );
+  const note = await fs.readFile(await indexedAnnotationPath(item.key), "utf8");
   secondImportCardIDs.add(readFrontmatterValue(note, "bridge_card_id"));
 }
 assert.deepEqual(secondImportCardIDs, firstImportCardIDs);
@@ -1337,28 +1485,23 @@ await createCardFromAnnotation(
   { id: cancelBatchIDs[0] },
   cancelBatchIDs,
 );
-const cancelledBatchFolder = path.join(
-  literaturePath,
-  "Updated Neural Mass Model (user-0-PAPER01)",
-  "Annotations",
-);
-const cancelledCards = (await fs.readdir(cancelledBatchFolder)).filter((name) =>
-  name.startsWith("CANCEL"),
+const cancelledIndex = await readCardIndex(indexPath);
+const cancelledCards = Object.keys(cancelledIndex.cards).filter((sourceID) =>
+  sourceID.startsWith("user:0/annotation/CANCEL"),
 );
 assert.equal(cancelledCards.length, 5);
 for (let index = 0; index < 5; index++) {
   assert.equal(
     await exists(
-      path.join(
-        cancelledBatchFolder,
-        `CANCEL${String(index + 1).padStart(3, "0")}.md`,
+      await indexedAnnotationPath(
+        `CANCEL${String(index + 1).padStart(3, "0")}`,
       ),
     ),
     true,
   );
 }
 assert.equal(
-  await exists(path.join(cancelledBatchFolder, "CANCEL006.md")),
+  Object.hasOwn(cancelledIndex.cards, "user:0/annotation/CANCEL006"),
   false,
 );
 assert.match(alerts.at(-1), /已处理 5\/10 条批注/);
@@ -1386,7 +1529,7 @@ const blockedWriteWait = new Promise((resolve) => {
   releaseBlockedWrite = resolve;
 });
 gatedCardWrite = {
-  marker: "zotero_annotation_key: R6CANCEL001",
+  marker: "In-flight cancellation 1",
   started: startBlockedWrite,
   wait: blockedWriteWait,
 };
@@ -1422,9 +1565,18 @@ const inFlightFolder = path.join(
   "Updated Neural Mass Model (user-0-PAPER01)",
   "Annotations",
 );
-assert.equal(await exists(path.join(inFlightFolder, "R6CANCEL001.md")), true);
-assert.equal(await exists(path.join(inFlightFolder, "R6CANCEL002.md")), false);
-assert.equal(await exists(path.join(inFlightFolder, "R6CANCEL003.md")), false);
+assert.equal(await exists(await indexedAnnotationPath("R6CANCEL001")), true);
+for (const key of ["R6CANCEL002", "R6CANCEL003"]) {
+  assert.equal(
+    await findCardByFrontmatter(
+      vaultPath,
+      "Zotero Literature",
+      "bridge_source_id",
+      `user:0/annotation/${key}`,
+    ),
+    null,
+  );
+}
 savedAnnotations = [annotation, batchAnnotation, failingBatchAnnotation];
 
 const companionQueue = path.join(dataPath, "companion-queue");
@@ -1538,7 +1690,7 @@ const standalonePaper = await fs.readFile(
 const standaloneCardPath = path.join(
   standaloneFolder,
   "Annotations",
-  "ORPHANANN.md",
+  "P01N01.md",
 );
 const standaloneCard = await fs.readFile(standaloneCardPath, "utf8");
 assert.equal(
@@ -1702,25 +1854,41 @@ if (process.env.R6_STRESS === "1") {
   };
 
   const diskFailure = makeR6Annotation("R6DISK001", 90001);
-  failCardWriteMarker = "zotero_annotation_key: R6DISK001";
+  failCardWriteMarker = "R6 test annotation R6DISK001";
   await assert.rejects(
     createOneR6Card(diskFailure),
     /injected card-content write failure/,
   );
-  assert.equal(await exists(path.join(inFlightFolder, "R6DISK001.md")), false);
+  assert.equal(
+    await findCardByFrontmatter(
+      vaultPath,
+      "Zotero Literature",
+      "bridge_source_id",
+      "user:0/annotation/R6DISK001",
+    ),
+    null,
+  );
   await createOneR6Card(diskFailure);
-  assert.equal(await exists(path.join(inFlightFolder, "R6DISK001.md")), true);
+  assert.equal(await exists(await indexedAnnotationPath("R6DISK001")), true);
 
   const permissionFailure = makeR6Annotation("R6PERM001", 90007);
-  failCardWriteMarker = "zotero_annotation_key: R6PERM001";
+  failCardWriteMarker = "R6 test annotation R6PERM001";
   failCardWriteCode = "EACCES";
   await assert.rejects(
     createOneR6Card(permissionFailure),
     (error) => error.code === "EACCES",
   );
-  assert.equal(await exists(path.join(inFlightFolder, "R6PERM001.md")), false);
+  assert.equal(
+    await findCardByFrontmatter(
+      vaultPath,
+      "Zotero Literature",
+      "bridge_source_id",
+      "user:0/annotation/R6PERM001",
+    ),
+    null,
+  );
   await createOneR6Card(permissionFailure);
-  assert.equal(await exists(path.join(inFlightFolder, "R6PERM001.md")), true);
+  assert.equal(await exists(await indexedAnnotationPath("R6PERM001")), true);
 
   const filesystemPermissionFailure = makeR6Annotation("R6PERM002", 90008);
   const originalDirectoryMode = (await fs.stat(inFlightFolder)).mode & 0o777;
@@ -1731,14 +1899,19 @@ if (process.env.R6_STRESS === "1") {
       (error) => error.code === "EACCES" || error.code === "EPERM",
     );
     assert.equal(
-      await exists(path.join(inFlightFolder, "R6PERM002.md")),
-      false,
+      await findCardByFrontmatter(
+        vaultPath,
+        "Zotero Literature",
+        "bridge_source_id",
+        "user:0/annotation/R6PERM002",
+      ),
+      null,
     );
   } finally {
     await fs.chmod(inFlightFolder, originalDirectoryMode);
   }
   await createOneR6Card(filesystemPermissionFailure);
-  assert.equal(await exists(path.join(inFlightFolder, "R6PERM002.md")), true);
+  assert.equal(await exists(await indexedAnnotationPath("R6PERM002")), true);
 
   const indexFailure = makeR6Annotation("R6INDEX001", 90002);
   const indexFailureSource = "user:0/annotation/R6INDEX001";
@@ -1747,22 +1920,30 @@ if (process.env.R6_STRESS === "1") {
     createOneR6Card(indexFailure),
     /injected card-index write failure/,
   );
-  const indexFailureCardPath = path.join(inFlightFolder, "R6INDEX001.md");
-  assert.equal(await exists(indexFailureCardPath), true);
+  const indexFailureCardPath = await findCardByFrontmatter(
+    vaultPath,
+    "Zotero Literature",
+    "bridge_source_id",
+    indexFailureSource,
+  );
+  assert.ok(indexFailureCardPath);
+  const absoluteIndexFailureCardPath = path.join(
+    vaultPath,
+    indexFailureCardPath,
+  );
+  assert.equal(await exists(absoluteIndexFailureCardPath), true);
   let r6Index = await readCardIndex(indexPath);
   assert.equal(r6Index.cards[indexFailureSource], undefined);
   const indexFailureCardID = readFrontmatterValue(
-    await fs.readFile(indexFailureCardPath, "utf8"),
+    await fs.readFile(absoluteIndexFailureCardPath, "utf8"),
     "bridge_card_id",
   );
   await createOneR6Card(indexFailure);
   r6Index = await readCardIndex(indexPath);
   assert.equal(r6Index.cards[indexFailureSource].cardID, indexFailureCardID);
   assert.equal(
-    (await fs.readdir(inFlightFolder)).filter((name) =>
-      name.startsWith("R6INDEX001"),
-    ).length,
-    1,
+    (await readCardIndex(indexPath)).cards[indexFailureSource].relativePath,
+    path.relative(vaultPath, absoluteIndexFailureCardPath),
   );
 
   const checkpointAnnotations = Array.from({ length: 30 }, (_, index) =>
@@ -1802,7 +1983,7 @@ if (process.env.R6_STRESS === "1") {
   await createOneR6Card(largeTextAnnotation);
   assert.ok(
     (
-      await fs.readFile(path.join(inFlightFolder, "R6BIGTXT001.md"), "utf8")
+      await fs.readFile(await indexedAnnotationPath("R6BIGTXT001"), "utf8")
     ).includes(largeText),
   );
 
@@ -1825,23 +2006,34 @@ if (process.env.R6_STRESS === "1") {
     close() {},
   });
   failResourceCommit = true;
+  const annotationFolder = inFlightFolder;
+  const imageAssetsFolder = path.join(annotationFolder, "assets");
+  const pageFiveCardsBeforeFailure = (await fs.readdir(annotationFolder))
+    .filter((name) => /^P05N\d+\.md$/.test(name))
+    .sort();
   await assert.rejects(
     createOneR6Card(imageAnnotation),
     /injected resource commit failure/,
   );
-  const imageAssetsFolder = path.join(inFlightFolder, "assets");
-  assert.equal(
-    await exists(path.join(inFlightFolder, `${imageKey}.md`)),
-    false,
+  assert.deepEqual(
+    (await fs.readdir(annotationFolder))
+      .filter((name) => /^P05N\d+\.md$/.test(name))
+      .sort(),
+    pageFiveCardsBeforeFailure,
   );
   assert.equal(
-    (await fs.readdir(imageAssetsFolder)).some((name) =>
-      name.startsWith(`${imageKey}-`),
-    ),
+    (
+      await fs.readdir(imageAssetsFolder).catch((error) => {
+        if (error.code === "ENOENT") return [];
+        throw error;
+      })
+    ).some((name) => name.startsWith(`${imageKey}-`)),
     false,
   );
   await createOneR6Card(imageAnnotation);
   globalThis.createImageBitmap = previousImageDecoder;
+  const imageCardPath = await indexedAnnotationPath(imageKey);
+  const absoluteImageCardPath = imageCardPath;
   const imageAssetNames = (await fs.readdir(imageAssetsFolder)).filter((name) =>
     name.startsWith(`${imageKey}-`),
   );
@@ -1855,7 +2047,7 @@ if (process.env.R6_STRESS === "1") {
     `${imageKey}-${createHash("sha256").update(imageBytes).digest("hex")}.png`,
   );
   assert.match(
-    await fs.readFile(path.join(inFlightFolder, `${imageKey}.md`), "utf8"),
+    await fs.readFile(absoluteImageCardPath, "utf8"),
     new RegExp(`assets/${imageKey}-[a-f0-9]{64}\\.png`),
   );
 
@@ -1877,8 +2069,12 @@ if (process.env.R6_STRESS === "1") {
     duplicateAnnotations.map((item) => String(item.id)),
   );
   assert.match(alerts.at(-1), /Multiple Markdown cards match bridge_source_id/);
-  assert.equal(await exists(path.join(inFlightFolder, "R6DUP001.md")), false);
-  assert.equal(await exists(path.join(inFlightFolder, "R6DUP002.md")), true);
+  const duplicateIndex = await readCardIndex(indexPath);
+  assert.equal(
+    Object.hasOwn(duplicateIndex.cards, "user:0/annotation/R6DUP001"),
+    false,
+  );
+  assert.equal(await exists(await indexedAnnotationPath("R6DUP002")), true);
 
   const benchmarkResults = [];
   const memoryAtStart = process.memoryUsage().rss;

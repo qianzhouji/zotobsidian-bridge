@@ -1,7 +1,9 @@
 # Obsidian Companion Protocol
 
-Protocol version 2 coordinates Markdown writes between the Zotero add-on and
-the Obsidian companion on one machine. It is not a multi-device sync protocol.
+Protocol version 3 coordinates Markdown writes between the Zotero add-on and
+the Obsidian companion on one machine. The companion also accepts queued v2
+create/replace/resource requests and replies using their original version. It
+is not a multi-device sync protocol.
 
 ## Queue Layout
 
@@ -35,10 +37,12 @@ Do not remove a live owner's file to force two consumers.
 ## Request Contract
 
 Markdown requests include `protocolVersion`, unique `requestId`, `createdAt`,
-`operation` (`create` or `replace`), registered `cardId` and `sourceId`, the
-target Vault ID, configured `outputFolder`, a Vault-relative Markdown
-`relativePath`, a `baseRevision`, and complete new `content`. Replace requests
-also include a recovery path/content pair.
+registered `cardId` and `sourceId`, the target Vault ID, configured
+`outputFolder`, a Vault-relative Markdown `relativePath`, a `baseRevision`, and
+complete `content`. `create` and `replace` retain their existing behavior;
+v3 adds `move`, which also names the existing `moveFromRelativePath` and uses
+the current file SHA-256 as its base revision. Replace requests include a
+recovery path/content pair; move requests cannot contain recovery data.
 
 `create-resource` requests use the same identity and Vault pairing fields, but
 carry no Markdown body. They specify a Vault-relative resource path, MIME type,
@@ -66,10 +70,12 @@ conflicts, and ownership by another Obsidian instance. Conflict details are
 available as the status item's tooltip and are returned to Zotero in the
 response. The command palette includes **Copy Zotero Bridge Vault pairing ID**.
 
-Version 2 is not wire-compatible with version 1. Before upgrading either app,
-drain the local queue, then upgrade both the Zotero add-on and Obsidian plugin.
-The pairing ID is stored in Obsidian plugin data and Zotero preferences; keep
-the same Vault and ID when upgrading.
+Version 3 is not wire-compatible with older companions for new v3 operations.
+The v3 companion accepts pending v2 queue entries and echoes each request's
+version in its response; Zotero writes the matching ACK version. Upgrade both
+apps to use v3 moves, and drain the queue before downgrading either app. The
+pairing ID is stored in Obsidian plugin data and Zotero preferences; keep the
+same Vault and ID when upgrading.
 
 ## State Transitions
 
@@ -80,6 +86,11 @@ the same Vault and ID when upgrading.
   are treated as idempotent; conflicting or invalid data is rejected.
 - `replace`: checks the SHA-256 base revision, checks identity, creates a
   recovery copy, then uses `Vault.process()` to re-check and apply the update.
+- `move`: checks the source identity and base revision, refuses an occupied
+  destination, waits while either path is open in an editor, then uses
+  Obsidian's `FileManager.renameFile()` to rename, update Vault links, and
+  verify unchanged card content. A retry after the rename is idempotent when
+  the destination has the same card identity.
 - Open in Obsidian editor: leave the request pending. Once closed, re-check the
   revision. If the user saved edits, report a conflict rather than replacing
   them.

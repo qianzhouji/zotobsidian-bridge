@@ -3,14 +3,19 @@ import {
   type SupportedImageMimeType,
 } from "../core/image-resource.ts";
 
-export type CompanionOperation = "create" | "replace" | "create-resource";
-export const COMPANION_PROTOCOL_VERSION = 2 as const;
+export type CompanionOperation =
+  | "create"
+  | "replace"
+  | "move"
+  | "create-resource";
+export type CompanionProtocolVersion = 2 | 3;
+export const COMPANION_PROTOCOL_VERSION = 3 as const;
 
 export const MAX_COMPANION_RESOURCE_BYTES = MAX_IMAGE_RESOURCE_BYTES;
 export type CompanionImageMimeType = SupportedImageMimeType;
 
 export interface CompanionMarkdownRequest {
-  protocolVersion: typeof COMPANION_PROTOCOL_VERSION;
+  protocolVersion: CompanionProtocolVersion;
   requestId: string;
   createdAt: string;
   operation: "create" | "replace";
@@ -25,8 +30,18 @@ export interface CompanionMarkdownRequest {
   recoveryContent?: string;
 }
 
+export interface CompanionMoveRequest extends Omit<
+  CompanionMarkdownRequest,
+  "protocolVersion" | "operation" | "baseRevision"
+> {
+  protocolVersion: 3;
+  operation: "move";
+  moveFromRelativePath: string;
+  baseRevision: string;
+}
+
 export interface CompanionResourceRequest {
-  protocolVersion: typeof COMPANION_PROTOCOL_VERSION;
+  protocolVersion: CompanionProtocolVersion;
   requestId: string;
   createdAt: string;
   operation: "create-resource";
@@ -43,18 +58,19 @@ export interface CompanionResourceRequest {
 
 export type CompanionWriteRequest =
   | CompanionMarkdownRequest
+  | CompanionMoveRequest
   | CompanionResourceRequest;
 
 export type CompanionWriteResponse =
   | {
-      protocolVersion: typeof COMPANION_PROTOCOL_VERSION;
+      protocolVersion: CompanionProtocolVersion;
       requestId: string;
       status: "applied";
       revision: string;
       completedAt: string;
     }
   | {
-      protocolVersion: typeof COMPANION_PROTOCOL_VERSION;
+      protocolVersion: CompanionProtocolVersion;
       requestId: string;
       status: "conflict";
       message: string;
@@ -62,7 +78,7 @@ export type CompanionWriteResponse =
     };
 
 export interface CompanionWriteAck {
-  protocolVersion: typeof COMPANION_PROTOCOL_VERSION;
+  protocolVersion: CompanionProtocolVersion;
   requestId: string;
   acknowledgedAt: string;
 }
@@ -79,13 +95,16 @@ export function isValidCompanionVaultId(value: unknown): value is string {
 export function validateCompanionResponse(
   value: unknown,
   expectedRequestId: string,
+  expectedProtocolVersion?: CompanionProtocolVersion,
 ): CompanionWriteResponse {
   if (!value || typeof value !== "object") {
     throw new Error("Obsidian returned an invalid companion response.");
   }
   const response = value as Partial<CompanionWriteResponse>;
   const validBase =
-    response.protocolVersion === COMPANION_PROTOCOL_VERSION &&
+    (response.protocolVersion === 2 || response.protocolVersion === 3) &&
+    (expectedProtocolVersion === undefined ||
+      response.protocolVersion === expectedProtocolVersion) &&
     response.requestId === expectedRequestId &&
     typeof response.completedAt === "string" &&
     Number.isFinite(Date.parse(response.completedAt));
@@ -111,13 +130,16 @@ export function validateCompanionResponse(
 export function validateCompanionAck(
   value: unknown,
   expectedRequestId: string,
+  expectedProtocolVersion?: CompanionProtocolVersion,
 ): CompanionWriteAck {
   if (!value || typeof value !== "object") {
     throw new Error("Zotero acknowledgement is malformed.");
   }
   const ack = value as Partial<CompanionWriteAck>;
   if (
-    ack.protocolVersion !== COMPANION_PROTOCOL_VERSION ||
+    (ack.protocolVersion !== 2 && ack.protocolVersion !== 3) ||
+    (expectedProtocolVersion !== undefined &&
+      ack.protocolVersion !== expectedProtocolVersion) ||
     ack.requestId !== expectedRequestId ||
     typeof ack.acknowledgedAt !== "string" ||
     !Number.isFinite(Date.parse(ack.acknowledgedAt))
@@ -189,6 +211,7 @@ export function validateCompanionRequest(
     "operation"
   > & {
     operation?: CompanionOperation;
+    moveFromRelativePath?: unknown;
     resourceMimeType?: unknown;
     resourceSha256?: unknown;
     resourceSizeBytes?: unknown;
@@ -208,7 +231,7 @@ export function validateCompanionRequest(
           request.cardId || "",
         );
   const invalidFields: string[] = [];
-  if (request.protocolVersion !== COMPANION_PROTOCOL_VERSION) {
+  if (request.protocolVersion !== 2 && request.protocolVersion !== 3) {
     invalidFields.push("protocolVersion");
   }
   if (
@@ -219,7 +242,9 @@ export function validateCompanionRequest(
     invalidFields.push("requestId");
   }
   if (
-    !["create", "replace", "create-resource"].includes(request.operation || "")
+    !["create", "replace", "move", "create-resource"].includes(
+      request.operation || "",
+    )
   ) {
     invalidFields.push("operation");
   }
@@ -252,7 +277,7 @@ export function validateCompanionRequest(
     invalidFields.push("baseRevision");
   }
   if (
-    request.operation === "replace" &&
+    (request.operation === "replace" || request.operation === "move") &&
     (typeof request.baseRevision !== "string" ||
       !/^[0-9a-f]{64}$/i.test(request.baseRevision))
   ) {
@@ -267,6 +292,42 @@ export function validateCompanionRequest(
     request.relativePath || "",
     configuredOutputFolder,
   );
+  if (request.operation === "move") {
+    if (
+      request.protocolVersion !== COMPANION_PROTOCOL_VERSION ||
+      typeof request.moveFromRelativePath !== "string"
+    ) {
+      invalidFields.push("moveFromRelativePath");
+    }
+  } else if (request.moveFromRelativePath !== undefined) {
+    invalidFields.push("moveFromRelativePath");
+  }
+  if (invalidFields.length > 0) {
+    throw new Error(
+      `Companion request is malformed or incompatible (${invalidFields.join(", ")}).`,
+    );
+  }
+  if (request.operation === "move") {
+    const moveFrom = assertAllowedCompanionPath(
+      typeof request.moveFromRelativePath === "string"
+        ? request.moveFromRelativePath
+        : "",
+      configuredOutputFolder,
+    );
+    if (
+      moveFrom === relativePath ||
+      !moveFrom.toLowerCase().endsWith(".md") ||
+      request.recoveryRelativePath !== undefined ||
+      request.recoveryContent !== undefined
+    ) {
+      throw new Error("Companion move metadata is malformed.");
+    }
+    return {
+      ...request,
+      relativePath,
+      moveFromRelativePath: moveFrom,
+    } as CompanionMoveRequest;
+  }
   if (isResource) {
     const mimeType = request.resourceMimeType as CompanionImageMimeType;
     const extension = resourceExtensions[mimeType];

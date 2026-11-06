@@ -4,21 +4,21 @@
     14px/1.45 system-ui,
     sans-serif;
   color: #202426;
-  background: #f4f6f5;
-  --line: #d6dcda;
+  background: #f4f7f9;
+  --line: #d6e0e7;
   --surface: #ffffff;
-  --text-muted: #5e6965;
-  --accent: #176c62;
+  --text-muted: #5c6972;
+  --accent: #82c2ea;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    color: #e8edeb;
-    background: #1c2221;
-    --line: #3a4542;
-    --surface: #242c2a;
-    --text-muted: #abb6b1;
-    --accent: #76c5b6;
+    color: #e8eef2;
+    background: #1b2227;
+    --line: #3a4952;
+    --surface: #242e35;
+    --text-muted: #afbbc3;
+    --accent: #79bce7;
   }
 }
 

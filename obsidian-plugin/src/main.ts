@@ -12,6 +12,7 @@ import {
   TAbstractFile,
   TFile,
   TFolder,
+  resolveSubpath,
 } from "obsidian";
 import {
   assertAllowedCompanionPath,
@@ -20,6 +21,7 @@ import {
   MAX_COMPANION_RESOURCE_BYTES,
   type CompanionWriteRequest,
   type CompanionWriteResponse,
+  type CompanionProtocolVersion,
   normalizeVaultRelativePath,
   validateCompanionAck,
   validateCompanionRequest,
@@ -28,7 +30,10 @@ import {
   assertImageDecodable,
   detectImageFormat,
 } from "../../src/core/image-resource.ts";
-import { readFrontmatterValue } from "../../src/core/markdown.ts";
+import {
+  hasSameMarkdownExceptUpdatedAt,
+  readFrontmatterValue,
+} from "../../src/core/markdown.ts";
 import {
   assertQueueOutsideVault,
   assertVaultPathContained,
@@ -39,17 +44,23 @@ import {
   type QueueOwnership,
 } from "./queue-ownership.ts";
 import { isRetryableFileError, retryDelayMs } from "./retry-policy.ts";
+import { NoteQueryService } from "./note-query-service.ts";
+import { validateNoteQueryPath } from "../../src/core/note-query-protocol.ts";
 
 interface BridgeSettings {
   queueDirectory: string;
   outputFolder: string;
   vaultId: string;
+  notePreviewEnabled: boolean;
+  noteReadFolders: string[];
 }
 
 const DEFAULT_SETTINGS: BridgeSettings = {
   queueDirectory: "",
   outputFolder: "Zotero Literature",
   vaultId: "",
+  notePreviewEnabled: false,
+  noteReadFolders: [],
 };
 const pollIntervalMs = 200;
 
@@ -110,24 +121,7 @@ function hasSameContentExceptUpdatedAt(
   current: string,
   requested: string,
 ): boolean {
-  const normalize = (markdown: string): string => {
-    if (!markdown.startsWith("---")) return markdown;
-    const openingEnd = markdown.indexOf("\n");
-    if (openingEnd < 0) return markdown;
-    const closingStart = markdown.indexOf("\n---", openingEnd + 1);
-    if (closingStart < 0) return markdown;
-    const frontmatter = markdown.slice(openingEnd + 1, closingStart);
-    const normalizedFrontmatter = frontmatter.replace(
-      /^bridge_updated_at:[^\r\n]*/m,
-      "bridge_updated_at: <volatile>",
-    );
-    return (
-      markdown.slice(0, openingEnd + 1) +
-      normalizedFrontmatter +
-      markdown.slice(closingStart)
-    );
-  };
-  return normalize(current) === normalize(requested);
+  return hasSameMarkdownExceptUpdatedAt(current, requested);
 }
 
 function isInsideActiveEditor(app: App, pathValue: string): boolean {
@@ -149,6 +143,8 @@ export default class ZoteroObsidianBridgePlugin extends Plugin {
     { attempts: number; nextAttemptAt: number }
   >();
   private heartbeatWriting = false;
+  private noteQueries?: NoteQueryService;
+  private noteQueryConfiguration: Promise<void> = Promise.resolve();
 
   async onload(): Promise<void> {
     this.settings = { ...DEFAULT_SETTINGS, ...(await this.loadData()) };
@@ -183,14 +179,46 @@ export default class ZoteroObsidianBridgePlugin extends Plugin {
       window.setInterval(() => void this.processQueue(), pollIntervalMs),
     );
     void this.processQueue();
+    this.app.workspace.onLayoutReady(() => void this.configureNoteQueries());
+    this.registerEvent(
+      this.app.metadataCache.on("changed", (file, data, cache) =>
+        this.noteQueries?.update(file, data, cache),
+      ),
+    );
+    this.registerEvent(
+      this.app.vault.on("create", (file) => {
+        if (file instanceof TFile) this.noteQueries?.update(file);
+      }),
+    );
+    this.registerEvent(
+      this.app.vault.on("modify", (file) => {
+        if (file instanceof TFile) this.noteQueries?.update(file);
+      }),
+    );
+    this.registerEvent(
+      this.app.vault.on("delete", (file) =>
+        this.noteQueries?.remove(file.path),
+      ),
+    );
+    this.registerEvent(
+      this.app.vault.on("rename", (file, oldPath) => {
+        this.noteQueries?.remove(oldPath);
+        if (file instanceof TFile) this.noteQueries?.update(file);
+      }),
+    );
   }
 
   onunload(): void {
     this.unloading = true;
+    void this.configureNoteQueries();
     if (!this.processing) void this.releaseQueueOwnership();
   }
 
   async saveSettings(): Promise<void> {
+    this.settings.noteReadFolders ??= [];
+    if (this.settings.noteReadFolders.length > 32)
+      throw new Error("At most 32 read folders are allowed.");
+    this.settings.noteReadFolders.forEach(validateNoteQueryPath);
     const persisted = (await this.loadData()) as Partial<BridgeSettings> | null;
     const oldQueue = persisted?.queueDirectory?.trim() || "";
     const changedPairing =
@@ -216,8 +244,57 @@ export default class ZoteroObsidianBridgePlugin extends Plugin {
       await this.releaseQueueOwnership();
     }
     await this.saveData(this.settings);
+    await this.configureNoteQueries();
     await this.writeStatusHeartbeat();
     void this.processQueue();
+  }
+
+  private configureNoteQueries(): Promise<void> {
+    this.noteQueryConfiguration = this.noteQueryConfiguration
+      .catch(() => {})
+      .then(async () => {
+        await this.noteQueries?.stop();
+        this.noteQueries = undefined;
+        if (this.unloading || !this.settings.queueDirectory.trim()) return;
+        const adapter = this.app.vault.adapter;
+        if (!(adapter instanceof FileSystemAdapter)) return;
+        const service = new NoteQueryService(
+          {
+            vaultRoot: adapter.getBasePath(),
+            files: () => this.app.vault.getMarkdownFiles(),
+            cache: (file) => this.app.metadataCache.getFileCache(file),
+            resolve: (link, source) =>
+              this.app.metadataCache.getFirstLinkpathDest(link, source),
+            resolveHeading: (headings, fragment) => {
+              const target = resolveSubpath({ headings }, `#${fragment}`);
+              return target?.type === "heading"
+                ? target.current.position.start.offset
+                : null;
+            },
+            file: (value) => {
+              const file = this.app.vault.getAbstractFileByPath(value);
+              return file instanceof TFile ? file : null;
+            },
+          },
+          {
+            queueDirectory: this.settings.queueDirectory.trim(),
+            vaultId: this.settings.vaultId,
+            enabled: this.settings.notePreviewEnabled,
+            readFolders: this.settings.noteReadFolders,
+          },
+        );
+        this.noteQueries = service;
+        try {
+          await service.start();
+        } catch {
+          await service.stop();
+          this.noteQueries = undefined;
+          new Notice(
+            "Linked-note reading could not start. Check the paired queue and read-folder settings.",
+          );
+        }
+      });
+    return this.noteQueryConfiguration;
   }
 
   async testVaultWriteAccess(): Promise<void> {
@@ -441,11 +518,14 @@ export default class ZoteroObsidianBridgePlugin extends Plugin {
           this.deferredRequests.delete(requestId);
           continue;
         }
+        let responseProtocolVersion: CompanionProtocolVersion =
+          COMPANION_PROTOCOL_VERSION;
         try {
           const request = validateCompanionRequest(
             JSON.parse(await fs.readFile(requestPath, "utf8")),
             this.settings.outputFolder,
           );
+          responseProtocolVersion = request.protocolVersion;
           if (request.requestId !== requestId) {
             throw new WriteConflictError("Request filename and ID differ.");
           }
@@ -456,7 +536,7 @@ export default class ZoteroObsidianBridgePlugin extends Plugin {
             continue;
           }
           const response: CompanionWriteResponse = {
-            protocolVersion: COMPANION_PROTOCOL_VERSION,
+            protocolVersion: responseProtocolVersion,
             requestId,
             status: "applied",
             revision: result,
@@ -478,7 +558,7 @@ export default class ZoteroObsidianBridgePlugin extends Plugin {
             continue;
           }
           const response: CompanionWriteResponse = {
-            protocolVersion: COMPANION_PROTOCOL_VERSION,
+            protocolVersion: responseProtocolVersion,
             requestId,
             status: "conflict",
             message: String(error),
@@ -600,7 +680,9 @@ export default class ZoteroObsidianBridgePlugin extends Plugin {
     });
   }
 
-  private async applyRequest(request: CompanionWriteRequest): Promise<string> {
+  private async applyRequest(
+    request: CompanionWriteRequest,
+  ): Promise<string | "deferred"> {
     try {
       assertCompanionVaultPairing(request.targetVaultId, this.settings.vaultId);
     } catch (error) {
@@ -623,6 +705,9 @@ export default class ZoteroObsidianBridgePlugin extends Plugin {
       throw new WriteConflictError(
         "Request content identity does not match its envelope.",
       );
+    }
+    if (request.operation === "move") {
+      return this.applyMoveRequest(request, relativePath);
     }
     const existing = this.app.vault.getAbstractFileByPath(relativePath);
     if (request.operation === "create") {
@@ -717,6 +802,79 @@ export default class ZoteroObsidianBridgePlugin extends Plugin {
     });
     if (!newRevision) return "deferred";
     return newRevision;
+  }
+
+  private async applyMoveRequest(
+    request: Extract<CompanionWriteRequest, { operation: "move" }>,
+    targetPath: string,
+  ): Promise<string | "deferred"> {
+    const sourcePath = assertAllowedCompanionPath(
+      request.moveFromRelativePath || "",
+      this.settings.outputFolder,
+    );
+    await this.assertVaultPathContained(sourcePath);
+    await this.assertVaultPathContained(targetPath);
+    if (isInsideActiveEditor(this.app, sourcePath)) return "deferred";
+
+    const source = this.app.vault.getAbstractFileByPath(sourcePath);
+    const target = this.app.vault.getAbstractFileByPath(targetPath);
+    if (target) {
+      if (source || !(target instanceof TFile)) {
+        throw new WriteConflictError(
+          "The rename destination already exists; neither file was changed.",
+        );
+      }
+      if (isInsideActiveEditor(this.app, targetPath)) return "deferred";
+      const movedContents = await this.app.vault.read(target);
+      if (!existingMatchesRequest(movedContents, request)) {
+        throw new WriteConflictError(
+          "The rename destination has a different card identity.",
+        );
+      }
+      return sha256(movedContents);
+    }
+    if (!(source instanceof TFile)) {
+      throw new WriteConflictError("The source card to rename is missing.");
+    }
+    const current = await this.app.vault.read(source);
+    if (!existingMatchesRequest(current, request)) {
+      throw new WriteConflictError("Source card identity changed.");
+    }
+    if (
+      current !== request.content ||
+      sha256(current) !== request.baseRevision
+    ) {
+      throw new WriteConflictError(
+        "Source card changed before rename; user edits were preserved.",
+      );
+    }
+
+    await this.ensureFolder(path.posix.dirname(targetPath));
+    await this.assertVaultPathContained(sourcePath);
+    await this.assertVaultPathContained(targetPath);
+    const latestSource = this.app.vault.getAbstractFileByPath(sourcePath);
+    if (
+      !(latestSource instanceof TFile) ||
+      latestSource.path !== source.path ||
+      this.app.vault.getAbstractFileByPath(targetPath)
+    ) {
+      throw new WriteConflictError("Vault paths changed before rename.");
+    }
+    await this.app.fileManager.renameFile(latestSource, targetPath);
+    const moved = this.app.vault.getAbstractFileByPath(targetPath);
+    if (!(moved instanceof TFile)) {
+      throw new WriteConflictError("Renamed card is missing from the Vault.");
+    }
+    const movedContents = await this.app.vault.read(moved);
+    if (
+      movedContents !== current ||
+      !existingMatchesRequest(movedContents, request)
+    ) {
+      throw new WriteConflictError(
+        "Renamed card verification failed; the existing content was preserved.",
+      );
+    }
+    return sha256(movedContents);
   }
 
   private async applyResourceRequest(
@@ -918,6 +1076,49 @@ class BridgeSettingTab extends PluginSettingTab {
           }
         }),
       );
+    new Setting(containerEl)
+      .setName("Read-only linked notes")
+      .setDesc(
+        "Allow the paired Zotero to search note names and aliases and read saved Markdown/images on request. This does not grant write access to knowledge notes.",
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.notePreviewEnabled)
+          .onChange(async (value) => {
+            const previous = this.plugin.settings.notePreviewEnabled;
+            this.plugin.settings.notePreviewEnabled = value;
+            try {
+              await this.plugin.saveSettings();
+            } catch (error) {
+              this.plugin.settings.notePreviewEnabled = previous;
+              new Notice(String(error));
+              this.display();
+            }
+          }),
+      );
+    new Setting(containerEl)
+      .setName("Allowed read folders")
+      .setDesc(
+        "One Vault-relative folder per line. Empty allows non-hidden Vault folders; configuration, trash and recovery folders remain excluded. Include the annotation output folder for root-link context.",
+      )
+      .addTextArea((text) => {
+        text.setValue(this.plugin.settings.noteReadFolders.join("\n"));
+        text.inputEl.addEventListener("blur", async () => {
+          const previous = this.plugin.settings.noteReadFolders;
+          this.plugin.settings.noteReadFolders = text
+            .getValue()
+            .split("\n")
+            .map((value) => value.trim())
+            .filter(Boolean);
+          try {
+            await this.plugin.saveSettings();
+          } catch (error) {
+            this.plugin.settings.noteReadFolders = previous;
+            new Notice(String(error));
+            this.display();
+          }
+        });
+      });
   }
 
   private commitOnBlur(

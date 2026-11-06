@@ -1,12 +1,24 @@
 import { basicSetup } from "codemirror";
+import { codemirrorWikiCompletion } from "./codemirror-wiki-completion.ts";
+import { createKnowledgeNoteCard } from "./knowledge-note-card.ts";
+import { setEditorInputEnabled } from "../adapters/editor-input-state.ts";
 import { EditorState } from "@codemirror/state";
 import { markdown } from "@codemirror/lang-markdown";
 import { EditorView, keymap } from "@codemirror/view";
+import {
+  bindNoteLinkNavigation,
+  createLinkStatus,
+} from "./note-link-navigation.ts";
 import { readFrontmatterValue } from "../core/markdown.ts";
 import {
   createMarkdownRenderer,
   renderMarkdown,
 } from "../core/markdown-preview.ts";
+import {
+  renderCardMarkdown,
+  setMarkdownPreviewHTML,
+  type RenderedCardMarkdown,
+} from "./card-markdown-preview.ts";
 import { formatLineDiff } from "../core/text-diff.ts";
 import {
   readSourceMarkdown,
@@ -17,10 +29,11 @@ import type { UserNoteContent } from "../core/note-content.ts";
 import type { AnnotationCardReference } from "./annotation-card.ts";
 import type { MarkdownEditorBridge } from "./markdown-editor.ts";
 import type { EditorConflictRecoveryCopy } from "../adapters/editor-drafts.ts";
-
-const pollIntervalMs = 1600;
-const draftDelayMs = 300;
-const saveDelayMs = 750;
+import {
+  acquireEditorSession,
+  type EditorSession,
+  type EditorSessionConflict,
+} from "./editor-session.ts";
 
 type EditorWindow = Window & {
   arguments?: unknown[];
@@ -31,10 +44,8 @@ interface DiskVersion {
   source: string;
 }
 
-interface ConflictState {
-  baseline: UserNoteContent;
-  disk: UserNoteContent;
-  local: UserNoteContent;
+export interface EditorWindowOptions {
+  mode?: "pending-card";
 }
 
 async function readDiskVersion(
@@ -88,7 +99,150 @@ function renderLineDiff(
 }
 
 function setDocumentText(element: HTMLElement, markdownText: string): void {
-  element.innerHTML = renderMarkdown(markdownText);
+  setMarkdownPreviewHTML(element, renderMarkdown(markdownText));
+}
+
+function setSourcePreview(
+  element: HTMLElement,
+  markdownText: string,
+  preferredColor?: string,
+): void {
+  const legacyColor = /^\s*\*\*Highlight color:\*\*\s*(#[\da-f]{6})\s*$/im.exec(
+    markdownText,
+  )?.[1];
+  const color = [preferredColor, legacyColor].find(
+    (value) => typeof value === "string" && /^#[\da-f]{6}$/i.test(value),
+  );
+  const visibleMarkdown = markdownText
+    .replace(/^\s*\*\*Highlight color:\*\*\s*#[\da-f]{6}\s*$/gim, "")
+    .replace(/\n{3,}/g, "\n\n");
+  setDocumentText(element, visibleMarkdown);
+
+  const quote = element.querySelector<HTMLElement>("blockquote");
+  if (!quote) return;
+  quote.style.padding = "0";
+  quote.style.color = "#202426";
+  quote.style.backgroundColor = "transparent";
+  quote.style.border = "0";
+  for (const paragraph of quote.querySelectorAll<HTMLElement>("p")) {
+    paragraph.style.backgroundColor = color ?? "transparent";
+    paragraph.style.color = "#202426";
+  }
+}
+
+function installResizableLayout(
+  window: EditorWindow,
+  document: Document,
+): void {
+  const app = getElement<HTMLElement>(document, "app");
+  const source = getElement<HTMLElement>(document, "source-section");
+  const sourceSplitter = getElement<HTMLElement>(document, "source-splitter");
+  const workspace = getElement<HTMLElement>(document, "workspace");
+  const paneSplitter = getElement<HTMLElement>(document, "workspace-splitter");
+  const storageKey = "zotero-obsidian-bridge:editor-layout:v1";
+  let sourceHeight = 112;
+  let editorRatio = 1;
+  let storage: Storage | null = null;
+
+  try {
+    storage = window.localStorage;
+    const saved = JSON.parse(storage?.getItem(storageKey) ?? "null");
+    if (Number.isFinite(saved?.sourceHeight)) sourceHeight = saved.sourceHeight;
+    if (Number.isFinite(saved?.editorRatio)) editorRatio = saved.editorRatio;
+  } catch {
+    // Layout remains usable when chrome storage is unavailable.
+  }
+
+  const saveLayout = () => {
+    if (!storage) return;
+    try {
+      storage.setItem(
+        storageKey,
+        JSON.stringify({ sourceHeight, editorRatio }),
+      );
+    } catch {
+      // Resizing does not depend on persistence.
+    }
+  };
+  const setSourceHeight = (value: number) => {
+    const max = Math.max(56, window.innerHeight - 240);
+    sourceHeight = Math.round(Math.min(max, Math.max(56, value)));
+    app.style.setProperty("--source-height", `${sourceHeight}px`);
+    sourceSplitter.setAttribute("aria-valuenow", String(sourceHeight));
+  };
+  const setEditorRatio = (value: number) => {
+    editorRatio = Math.min(2.2, Math.max(0.45, value));
+    workspace.style.setProperty("--editor-track", `${editorRatio}fr`);
+    paneSplitter.setAttribute(
+      "aria-valuenow",
+      String(Math.round((editorRatio / (editorRatio + 1)) * 100)),
+    );
+  };
+
+  setSourceHeight(sourceHeight);
+  setEditorRatio(editorRatio);
+
+  const bindSplitter = (
+    splitter: HTMLElement,
+    orientation: "horizontal" | "vertical",
+  ) => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (
+        orientation === "horizontal" &&
+        ["ArrowUp", "ArrowDown"].includes(event.key)
+      ) {
+        event.preventDefault();
+        setSourceHeight(sourceHeight + (event.key === "ArrowDown" ? 12 : -12));
+        saveLayout();
+      } else if (
+        orientation === "vertical" &&
+        ["ArrowLeft", "ArrowRight"].includes(event.key)
+      ) {
+        event.preventDefault();
+        setEditorRatio(editorRatio + (event.key === "ArrowRight" ? 0.1 : -0.1));
+        saveLayout();
+      }
+    };
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      const startX = event.clientX;
+      const startY = event.clientY;
+      const startHeight = source.getBoundingClientRect().height;
+      const startRatio = editorRatio;
+      const startWorkspace = workspace.getBoundingClientRect();
+      const onMove = (moveEvent: PointerEvent) => {
+        if (orientation === "horizontal") {
+          setSourceHeight(startHeight + moveEvent.clientY - startY);
+          return;
+        }
+        const fraction = Math.min(
+          0.72,
+          Math.max(
+            0.28,
+            (moveEvent.clientX - startWorkspace.left) / startWorkspace.width,
+          ),
+        );
+        setEditorRatio(fraction / (1 - fraction));
+      };
+      const onUp = () => {
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        window.removeEventListener("pointercancel", onUp);
+        saveLayout();
+      };
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp, { once: true });
+      window.addEventListener("pointercancel", onUp, { once: true });
+      if (orientation === "vertical") setEditorRatio(startRatio);
+    };
+    splitter.addEventListener("keydown", onKeyDown);
+    splitter.addEventListener("pointerdown", onPointerDown);
+  };
+
+  bindSplitter(sourceSplitter, "horizontal");
+  bindSplitter(paneSplitter, "vertical");
+  window.addEventListener("resize", () => setSourceHeight(sourceHeight));
 }
 
 function isSafeExternalLink(rawURL: string): boolean {
@@ -106,8 +260,11 @@ export async function initializeMarkdownEditor(
   window: EditorWindow,
   reference: AnnotationCardReference,
   bridge: MarkdownEditorBridge,
+  sharedSession?: EditorSession,
+  options: EditorWindowOptions = {},
 ): Promise<void> {
   const { document } = window;
+  installResizableLayout(window, document);
   const titleInput = getElement<HTMLInputElement>(document, "note-title");
   const editorHost = getElement<HTMLDivElement>(document, "editor-host");
   const preview = getElement<HTMLDivElement>(document, "preview");
@@ -134,27 +291,38 @@ export async function initializeMarkdownEditor(
     "recovery-copies",
   );
   const recoveryCopies: EditorConflictRecoveryCopy[] = [];
-  const savedDraft = await bridge.readDraft(reference.cardID);
-  let firstVersion: DiskVersion;
-  let vaultUnavailable = false;
-  try {
-    firstVersion = await readDiskVersion(reference, bridge);
-  } catch (error) {
-    if (!savedDraft) throw error;
-    firstVersion = { content: savedDraft.baseline, source: "" };
-    vaultUnavailable = true;
+  if (options.mode === "pending-card") {
+    getElement<HTMLButtonElement>(document, "open-obsidian").hidden = true;
+    recoveryButton.hidden = true;
+    getElement<HTMLButtonElement>(document, "open-zotero").hidden = true;
   }
-  let baseline: UserNoteContent = firstVersion.content;
-  let currentSource = "";
-  let conflict: ConflictState | null = null;
-  let composing = false;
+  const session =
+    sharedSession ??
+    acquireEditorSession(
+      {
+        vaultPath: reference.vaultPath,
+        cardID: reference.cardID,
+        sourceID: reference.sourceID,
+        relativePath: reference.relativePath,
+      },
+      {
+        readDisk: () => readDiskVersion(reference, bridge),
+        readDraft: (cardID) => bridge.readDraft(cardID),
+        writeDraft: (draft) => bridge.writeDraft(draft),
+        deleteDraft: (cardID) => bridge.deleteDraft(cardID),
+        save: (baseline, next, force = false) =>
+          bridge.saveUserContent(baseline, next, force),
+      },
+    );
+  const initialSession = await session.initialize();
+  let baseline: UserNoteContent = initialSession.baseline;
+  let currentSource = initialSession.source;
+  let conflict: EditorSessionConflict | null = initialSession.conflict;
+  let composing = initialSession.composing;
+  let vaultUnavailable = initialSession.vaultUnavailable;
+  let localContent: UserNoteContent = initialSession.content;
   let hydrating = false;
   let disposed = false;
-  let draftTimer = 0;
-  let saveTimer = 0;
-  let saveTail: Promise<void> = Promise.resolve();
-  let draftTail: Promise<void> = Promise.resolve();
-  let pollTimer = 0;
 
   const recoveryMessages = bridge.recoveryMessages;
   getElement<HTMLElement>(document, "recovery-heading").textContent =
@@ -217,46 +385,46 @@ export async function initializeMarkdownEditor(
     if (!window.confirm(recoveryMessages.confirm)) return;
     restoreButton.disabled = true;
     recoveryStatus.textContent = "";
-    window.clearTimeout(saveTimer);
-    window.clearTimeout(draftTimer);
     void (async () => {
-      await saveTail;
-      await draftTail;
-      const latest = await readDiskVersion(reference, bridge);
+      await session.requestSave();
+      await session.flushDraft();
+      const restoreRevision = session.snapshot().revision;
       const local = currentContent();
+      const latest = await readDiskVersion(reference, bridge);
       const now = new Date().toISOString();
       await bridge.archiveConflict({
         schema: 1,
         cardID: reference.cardID,
         sourceID: reference.sourceID,
         relativePath: reference.relativePath,
-        baseline: { ...baseline },
+        baseline: session.snapshot().baseline,
         disk: latest.content,
         draft: local,
         updatedAt: now,
         resolution: "restore-copy",
         archivedAt: now,
       });
-      const result = await bridge.saveUserContent(
+      if (session.snapshot().revision !== restoreRevision) {
+        throw new Error("Editor changed while preparing the restore; retry.");
+      }
+      const result = await session.restore(
         latest.content,
         selected.draft,
+        restoreRevision,
       );
       if (result.status === "conflict") {
-        conflict = {
-          baseline: latest.content,
-          disk: result.current,
-          local: selected.draft,
-        };
         renderConflict();
         recoveryStatus.textContent = recoveryMessages.conflict;
         return;
       }
       if (result.status === "error") throw new Error(result.message);
-      baseline = { ...selected.draft, title: selected.draft.title.trim() };
-      conflict = null;
-      hydrate(baseline);
+      if (result.status === "pending") {
+        recoveryStatus.textContent =
+          "Waiting for Obsidian to apply the restore.";
+        setStatus(document, "Waiting for Obsidian", "pending");
+        return;
+      }
       renderConflict();
-      await clearDraft();
       recoveryStatus.textContent = recoveryMessages.restored;
       setStatus(document, recoveryMessages.restored, "saved");
     })()
@@ -269,72 +437,65 @@ export async function initializeMarkdownEditor(
       });
   });
 
-  const writeDraft = (content: UserNoteContent) => {
-    const snapshot = {
-      schema: 1 as const,
-      cardID: reference.cardID,
-      sourceID: reference.sourceID,
-      relativePath: reference.relativePath,
-      baseline: { ...baseline },
-      draft: { ...content },
-      updatedAt: new Date().toISOString(),
-    };
-    const operation = draftTail.then(() => bridge.writeDraft(snapshot));
-    draftTail = operation.catch(() => {});
-    return operation;
-  };
-
-  const clearDraft = async () => {
-    await draftTail;
-    await bridge.deleteDraft(reference.cardID);
-  };
-
   const docTitle = getElement<HTMLElement>(document, "document-title");
   const meta = getElement<HTMLElement>(document, "paper-meta");
   docTitle.textContent = reference.paperTitle || "Untitled paper";
-  meta.textContent = [reference.paperCreator, reference.relativePath]
-    .filter(Boolean)
-    .join(" | ");
-
-  currentSource = firstVersion.source;
-  let localContent = { ...baseline };
-  if (savedDraft) {
-    if (
-      savedDraft.sourceID !== reference.sourceID ||
-      savedDraft.relativePath !== reference.relativePath
-    ) {
-      throw new Error(
-        "A recovery draft exists for a different card location; it was preserved.",
-      );
-    }
-    if (
-      !vaultUnavailable &&
-      sameUserNoteContent(savedDraft.draft, firstVersion.content)
-    ) {
-      await clearDraft();
-    } else {
-      baseline = savedDraft.baseline;
-      localContent = savedDraft.draft;
-      if (
-        !vaultUnavailable &&
-        !sameUserNoteContent(firstVersion.content, savedDraft.baseline)
-      ) {
-        conflict = {
-          baseline: savedDraft.baseline,
-          disk: firstVersion.content,
-          local: savedDraft.draft,
-        };
-      }
-    }
-  }
+  meta.textContent =
+    options.mode === "pending-card"
+      ? [reference.paperCreator, "Obsidian card creation pending"]
+          .filter(Boolean)
+          .join(" | ")
+      : [reference.paperCreator, reference.relativePath]
+          .filter(Boolean)
+          .join(" | ");
 
   const md = createMarkdownRenderer();
+  let previewGeneration = 0;
+  let renderedUserPreview: RenderedCardMarkdown | null = null;
+  let lastPreviewMarkdown: string | undefined;
+  let lastSourceMarkdown: string | undefined;
+  let refreshKnowledgeRelations = () => {};
+  const renderSourcePreview = () => {
+    if (currentSource === lastSourceMarkdown) return;
+    lastSourceMarkdown = currentSource;
+    setSourcePreview(sourcePreview, currentSource, reference.annotationColor);
+  };
+  const renderUserPreview = (markdownText: string) => {
+    refreshKnowledgeRelations();
+    if (markdownText === lastPreviewMarkdown) return;
+    lastPreviewMarkdown = markdownText;
+    const generation = ++previewGeneration;
+    void renderCardMarkdown(
+      markdownText,
+      reference,
+      document,
+      (_rootPath, relativePath) => bridge.readPreviewImage(relativePath),
+    )
+      .then((rendered) => {
+        if (disposed || generation !== previewGeneration) {
+          rendered.dispose();
+          return;
+        }
+        renderedUserPreview?.dispose();
+        renderedUserPreview = rendered;
+        setMarkdownPreviewHTML(preview, rendered.html);
+        refreshKnowledgeRelations();
+      })
+      .catch((error) => {
+        if (generation !== previewGeneration) return;
+        lastPreviewMarkdown = undefined;
+        setStatus(document, `Preview failed: ${String(error)}`, "error");
+      });
+  };
   const editor = new EditorView({
     state: EditorState.create({
       doc: localContent.markdown,
       extensions: [
         basicSetup,
         markdown(),
+        codemirrorWikiCompletion(document, reference.relativePath, () =>
+          bridge.createNoteQueryClient(),
+        ),
         EditorView.theme({
           "&": { height: "100%", fontSize: "14px" },
           ".cm-scroller": { overflow: "auto", fontFamily: "inherit" },
@@ -356,9 +517,10 @@ export async function initializeMarkdownEditor(
             ...localContent,
             markdown: update.state.doc.toString(),
           };
-          preview.innerHTML = md.render(localContent.markdown);
+          renderUserPreview(localContent.markdown);
           if (conflict) renderConflict();
-          if (!composing) scheduleSave();
+          if (composing) session.edit(currentContent(), sessionViewID);
+          else scheduleSave();
         }),
       ],
     }),
@@ -399,17 +561,40 @@ export async function initializeMarkdownEditor(
 
   const hydrate = (content: UserNoteContent) => {
     hydrating = true;
-    titleInput.value = content.title;
-    localContent = { ...content };
-    editor.dispatch({
-      changes: {
-        from: 0,
-        to: editor.state.doc.length,
-        insert: content.markdown,
-      },
-    });
-    preview.innerHTML = md.render(content.markdown);
-    hydrating = false;
+    try {
+      titleInput.value = content.title;
+      localContent = { ...content };
+      const previous = editor.state.doc.toString();
+      if (previous !== content.markdown) {
+        let from = 0;
+        while (
+          from < previous.length &&
+          from < content.markdown.length &&
+          previous[from] === content.markdown[from]
+        )
+          from++;
+        let end = previous.length;
+        let nextEnd = content.markdown.length;
+        while (
+          end > from &&
+          nextEnd > from &&
+          previous[end - 1] === content.markdown[nextEnd - 1]
+        ) {
+          end--;
+          nextEnd--;
+        }
+        editor.dispatch({
+          changes: {
+            from,
+            to: end,
+            insert: content.markdown.slice(from, nextEnd),
+          },
+        });
+      }
+      renderUserPreview(content.markdown);
+    } finally {
+      hydrating = false;
+    }
   };
 
   const currentContent = (): UserNoteContent => ({
@@ -417,79 +602,95 @@ export async function initializeMarkdownEditor(
     markdown: editor.state.doc.toString(),
   });
 
-  function scheduleSave(): void {
-    if (disposed || composing) return;
-    window.clearTimeout(draftTimer);
-    window.clearTimeout(saveTimer);
-    draftTimer = window.setTimeout(() => {
-      void writeDraft(currentContent()).catch((error) =>
+  let sessionViewID = 0;
+  const sessionView = session.attachView((snapshot) => {
+    baseline = snapshot.baseline;
+    currentSource = snapshot.source;
+    conflict = snapshot.conflict;
+    composing = snapshot.composing;
+    vaultUnavailable = snapshot.vaultUnavailable;
+    const otherViewComposing =
+      snapshot.composing && snapshot.compositionOwner !== sessionViewID;
+    setEditorInputEnabled(editor.contentDOM, titleInput, !otherViewComposing);
+    const ownsComposition =
+      snapshot.composing && snapshot.compositionOwner === sessionViewID;
+    if (
+      !ownsComposition &&
+      !sameUserNoteContent(localContent, snapshot.content)
+    ) {
+      hydrate(snapshot.content);
+    }
+    if (!ownsComposition) localContent = snapshot.content;
+    renderSourcePreview();
+    renderUserPreview(localContent.markdown);
+    if (conflict) {
+      renderConflict();
+      return;
+    }
+    renderConflict();
+    if (snapshot.status === "error") {
+      setStatus(document, `Save failed: ${snapshot.error}`, "error");
+    } else if (snapshot.status === "offline") {
+      setStatus(
+        document,
+        `Vault unavailable; ${snapshot.draftPersisted ? "local draft saved" : "local draft not confirmed"}: ${snapshot.error}`,
+        "error",
+      );
+    } else {
+      const labels = {
+        saved: "Saved",
+        dirty: snapshot.draftPersisted
+          ? "Local draft saved; sync pending"
+          : "Unsaved changes",
+        saving: "Saving",
+        pending: "Waiting for Obsidian",
+        conflict: "Conflict",
+        error: "Save failed",
+        offline: "Vault unavailable",
+      } as const;
+      if (options.mode === "pending-card") {
+        const pendingLabels = {
+          saved:
+            snapshot.revision > 0
+              ? "Local draft saved; card creation pending"
+              : "Card creation pending",
+          dirty: snapshot.draftPersisted
+            ? "Local draft saved; card creation pending"
+            : "Saving local draft",
+          saving: "Saving local draft",
+          pending: "Local draft saved; card creation pending",
+          conflict: "Local draft conflict",
+          error: `Local draft save failed: ${snapshot.error}`,
+          offline: `Local draft unavailable: ${snapshot.error}`,
+        } as const;
         setStatus(
           document,
-          `Draft could not be stored: ${String(error)}`,
-          "error",
-        ),
-      );
-    }, draftDelayMs);
+          pendingLabels[snapshot.status],
+          snapshot.status === "saved" ? "pending" : snapshot.status,
+        );
+      } else {
+        setStatus(document, labels[snapshot.status], snapshot.status);
+      }
+    }
+  });
+  sessionViewID = sessionView.id;
+
+  function scheduleSave(): void {
+    if (disposed || composing) return;
+    session.edit(currentContent(), sessionViewID);
     if (conflict) {
       renderConflict();
     } else {
-      saveTimer = window.setTimeout(() => void queueSave(), saveDelayMs);
       setStatus(document, "Unsaved changes", "dirty");
     }
   }
 
   function queueSave(): Promise<void> {
-    if (disposed || composing || conflict) return saveTail;
-    window.clearTimeout(saveTimer);
-    const snapshot = currentContent();
-    saveTail = saveTail
-      .then(async () => {
-        if (disposed || conflict) return;
-        if (sameUserNoteContent(snapshot, baseline)) {
-          await clearDraft();
-          setStatus(document, "Saved", "saved");
-          return;
-        }
-        setStatus(document, "Saving", "saving");
-        await writeDraft(snapshot);
-        const result = await bridge.saveUserContent(baseline, snapshot);
-        if (result.status === "error") throw new Error(result.message);
-        if (result.status === "conflict") {
-          conflict = {
-            baseline,
-            disk: result.current,
-            local: currentContent(),
-          };
-          await writeDraft(currentContent());
-          renderConflict();
-          return;
-        }
-        baseline = { ...snapshot, title: snapshot.title.trim() };
-        if (sameUserNoteContent(currentContent(), snapshot)) {
-          await clearDraft();
-          conflict = null;
-          renderConflict();
-          setStatus(document, "Saved", "saved");
-        } else {
-          await writeDraft(currentContent());
-          setStatus(document, "Newer edits are waiting to save", "dirty");
-          window.setTimeout(() => void queueSave(), 0);
-        }
-      })
-      .catch((error) =>
-        setStatus(document, `Save failed: ${String(error)}`, "error"),
-      );
-    return saveTail;
+    if (disposed) return Promise.resolve();
+    return session.requestSave().catch((error) => {
+      setStatus(document, `Save failed: ${String(error)}`, "error");
+    });
   }
-
-  const adoptDisk = async (disk: UserNoteContent) => {
-    baseline = { ...disk };
-    conflict = null;
-    hydrate(disk);
-    renderConflict();
-    await clearDraft();
-    setStatus(document, "Using the Obsidian version", "saved");
-  };
 
   const archiveConflict = async (
     resolution: "use-disk" | "keep-local",
@@ -515,10 +716,12 @@ export async function initializeMarkdownEditor(
     "click",
     () => {
       void (async () => {
-        const latest = await readDiskVersion(reference, bridge);
+        const expectedRevision = session.snapshot().revision;
         const local = currentContent();
+        const latest = await readDiskVersion(reference, bridge);
         await archiveConflict("use-disk", latest.content, local);
-        await adoptDisk(latest.content);
+        await session.useDisk(latest.content, latest.source, expectedRevision);
+        setStatus(document, "Using the Obsidian version", "saved");
       })().catch((error) =>
         setStatus(
           document,
@@ -533,28 +736,21 @@ export async function initializeMarkdownEditor(
     "click",
     () => {
       void (async () => {
-        const latest = await readDiskVersion(reference, bridge);
+        const expectedRevision = session.snapshot().revision;
         const local = currentContent();
+        const latest = await readDiskVersion(reference, bridge);
         await archiveConflict("keep-local", latest.content, local);
-        const result = await bridge.saveUserContent(
+        const result = await session.keepLocal(
           latest.content,
           local,
-          true,
+          expectedRevision,
         );
         if (result.status === "error") throw new Error(result.message);
         if (result.status === "conflict") {
-          conflict = {
-            baseline: latest.content,
-            disk: result.current,
-            local,
-          };
           renderConflict();
           return;
         }
-        baseline = { ...local, title: local.title.trim() };
-        conflict = null;
-        renderConflict();
-        await clearDraft();
+        if (result.status === "pending") return;
         setStatus(
           document,
           "Local version saved; both versions are archived",
@@ -577,14 +773,17 @@ export async function initializeMarkdownEditor(
     if (!hydrating) scheduleSave();
   });
   editor.contentDOM.addEventListener("compositionstart", () => {
+    if (!session.beginComposition(sessionViewID)) return;
     composing = true;
-    window.clearTimeout(draftTimer);
-    window.clearTimeout(saveTimer);
     setStatus(document, "Composing", "saving");
   });
   editor.contentDOM.addEventListener("compositionend", () => {
-    composing = false;
-    scheduleSave();
+    void Promise.resolve().then(() => {
+      if (disposed || session.snapshot().compositionOwner !== sessionViewID)
+        return;
+      composing = false;
+      session.endComposition(currentContent(), sessionViewID);
+    });
   });
 
   for (const container of [preview, sourcePreview]) {
@@ -599,8 +798,37 @@ export async function initializeMarkdownEditor(
     });
   }
 
-  setDocumentText(sourcePreview, currentSource);
-  preview.innerHTML = md.render(localContent.markdown);
+  const knowledgeCard = createKnowledgeNoteCard({
+    owner: getElement<HTMLElement>(document, "workspace"),
+    controlHost: document.querySelector<HTMLElement>(".actions") ?? undefined,
+    createClient: () => bridge.createNoteQueryClient(),
+    vaultPath: reference.vaultPath,
+    launchURL: (url) => bridge.launchURL(url),
+    root: {
+      sourcePath: reference.relativePath,
+      markdown: () => editor.state.doc.toString(),
+      previews: [preview],
+      anchor: docTitle,
+    },
+  });
+  refreshKnowledgeRelations = knowledgeCard.refreshRelations;
+  const disposeNoteLinks = bindNoteLinkNavigation({
+    onNavigate: knowledgeCard.open,
+    createClient: () => bridge.createNoteQueryClient(),
+    previews: [preview, sourcePreview],
+    editor: editor.contentDOM,
+    sourcePath: reference.relativePath,
+    markdown: () => editor.state.doc.toString(),
+    offset: (event) =>
+      editor.posAtCoords({ x: event.clientX, y: event.clientY }),
+    locateLocal: (offset) => {
+      editor.dispatch({ selection: { anchor: offset }, scrollIntoView: true });
+      editor.focus();
+    },
+    status: createLinkStatus((preview.parentElement ?? preview) as HTMLElement),
+  });
+  renderSourcePreview();
+  renderUserPreview(localContent.markdown);
   getElement<HTMLButtonElement>(document, "save-now").addEventListener(
     "click",
     () => void queueSave(),
@@ -616,79 +844,85 @@ export async function initializeMarkdownEditor(
         `obsidian://open?path=${encodeURIComponent(reference.absolutePath)}`,
       ),
   );
+  let closing = false;
+  const closeEditor = () => {
+    if (closing || disposed) return;
+    closing = true;
+    const content = currentContent();
+    if (session.snapshot().compositionOwner === sessionViewID) {
+      session.endComposition(content, sessionViewID);
+    } else if (!sameUserNoteContent(content, session.snapshot().content)) {
+      if (!session.edit(content, sessionViewID)) {
+        closing = false;
+        return;
+      }
+    }
+    void session
+      .flushDraft()
+      .then(() => window.close())
+      .catch((error) => {
+        closing = false;
+        setStatus(
+          document,
+          `Close cancelled; draft checkpoint failed: ${String(error)}`,
+          "error",
+        );
+      });
+  };
   getElement<HTMLButtonElement>(document, "close-editor").addEventListener(
     "click",
-    () => window.close(),
+    closeEditor,
+  );
+  window.addEventListener(
+    "keydown",
+    (rawEvent) => {
+      const event = rawEvent as KeyboardEvent;
+      if (
+        (event.metaKey || event.ctrlKey) &&
+        !event.altKey &&
+        !event.shiftKey &&
+        event.key.toLowerCase() === "w"
+      ) {
+        event.preventDefault();
+        event.stopPropagation();
+        closeEditor();
+      }
+    },
+    true,
   );
 
   if (conflict) renderConflict();
-  else if (vaultUnavailable) {
+  else if (options.mode === "pending-card") {
+    setStatus(document, "Card creation pending", "pending");
+  } else if (vaultUnavailable) {
     setStatus(document, "Vault unavailable; local draft recovered", "error");
+  } else if (initialSession.revision > 0) {
+    setStatus(document, "Recovered local draft", "dirty");
   } else {
-    setStatus(
-      document,
-      savedDraft ? "Recovered local draft" : "Saved",
-      savedDraft ? "dirty" : "saved",
-    );
+    setStatus(document, "Saved", "saved");
   }
 
-  const pollExternalChanges = async () => {
-    if (disposed || composing) return;
-    try {
-      const latest = await readDiskVersion(reference, bridge);
-      if (latest.source !== currentSource) {
-        currentSource = latest.source;
-        setDocumentText(sourcePreview, currentSource);
-      }
-      if (sameUserNoteContent(latest.content, baseline)) {
-        vaultUnavailable = false;
-        if (!conflict && !sameUserNoteContent(currentContent(), baseline)) {
-          void queueSave();
-        }
-        return;
-      }
-      vaultUnavailable = false;
-      if (!conflict && sameUserNoteContent(currentContent(), baseline)) {
-        await adoptDisk(latest.content);
-      } else {
-        conflict = {
-          baseline,
-          disk: latest.content,
-          local: currentContent(),
-        };
-        await writeDraft(currentContent());
-        renderConflict();
-      }
-    } catch (error) {
-      setStatus(
-        document,
-        `Vault check failed; local draft is retained: ${String(error)}`,
-        "error",
-      );
-    }
-  };
-
-  pollTimer = window.setInterval(
-    () => void pollExternalChanges(),
-    pollIntervalMs,
-  );
-  window.addEventListener("focus", () => void pollExternalChanges());
+  const onFocus = () => void session.poll();
+  window.addEventListener("focus", onFocus);
   window.addEventListener(
     "pagehide",
     () => {
       disposed = true;
-      window.clearInterval(pollTimer);
-      window.clearTimeout(draftTimer);
-      window.clearTimeout(saveTimer);
+      disposeNoteLinks();
+      knowledgeCard.dispose();
+      previewGeneration++;
+      renderedUserPreview?.dispose();
+      renderedUserPreview = null;
       const content = currentContent();
-      if (!sameUserNoteContent(content, baseline)) {
-        void writeDraft(content).catch(() => {});
+      if (!sameUserNoteContent(content, session.snapshot().content)) {
+        session.edit(content, sessionViewID);
       }
+      window.removeEventListener("focus", onFocus);
+      sessionView.detach();
       editor.destroy();
     },
     { once: true },
   );
-  if (savedDraft && !conflict) scheduleSave();
 }
 
 export function initializeEditorWindow(window: EditorWindow): void {
@@ -696,12 +930,20 @@ export function initializeEditorWindow(window: EditorWindow): void {
     | AnnotationCardReference
     | undefined;
   const bridge = window.arguments?.[1] as MarkdownEditorBridge | undefined;
+  const session = window.arguments?.[2] as EditorSession | undefined;
+  const options = window.arguments?.[3] as EditorWindowOptions | undefined;
   if (!reference || !bridge) {
     const status = window.document.getElementById("status");
     if (status) status.textContent = "Editor card reference was not provided.";
     return;
   }
-  void initializeMarkdownEditor(window, reference, bridge).catch((error) => {
+  void initializeMarkdownEditor(
+    window,
+    reference,
+    bridge,
+    session,
+    options,
+  ).catch((error) => {
     const status = window.document.getElementById("status");
     if (status) {
       status.textContent = `Editor failed to load: ${String(error)}`;

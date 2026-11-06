@@ -1,0 +1,158 @@
+<!doctype html>
+<html
+  id="zotero-obsidian-bridge-editor"
+  title="Zotero Obsidian Bridge - Markdown editor"
+  width="1180"
+  height="820"
+  persist="width height screenX screenY"
+>
+  <head>
+    <link rel="stylesheet" href="chrome://global/skin/" />
+    <link
+      rel="stylesheet"
+      href="chrome://zoteroobsidianbridge/content/katex.min.css"
+    />
+    <link
+      rel="stylesheet"
+      href="chrome://zoteroobsidianbridge/content/editor.css"
+    />
+    <meta charset="utf-8" />
+    <title>Zotero Obsidian Bridge - Markdown editor</title>
+    <script src="chrome://zoteroobsidianbridge/content/scripts/zoteroobsidianbridge-editor.js"></script>
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <div class="heading">
+          <h1 id="document-title">Loading card...</h1>
+          <div id="paper-meta" class="meta"></div>
+        </div>
+        <nav class="actions" aria-label="Card actions">
+          <button id="open-zotero" type="button">Open in Zotero</button>
+          <button id="open-obsidian" type="button">Open in Obsidian</button>
+          <button id="recovery-copies" type="button">Recovery copies</button>
+          <button id="close-editor" type="button" title="Close editor">
+            Close
+          </button>
+        </nav>
+      </header>
+
+      <section
+        id="source-section"
+        class="source-section"
+        aria-labelledby="source-heading"
+      >
+        <div class="section-heading">
+          <h2 id="source-heading">Zotero source</h2>
+          <span>Read only</span>
+        </div>
+        <div id="source-preview" class="source-preview markdown-body"></div>
+      </section>
+      <div
+        id="source-splitter"
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label="Resize Zotero source panel"
+        aria-valuenow="112"
+        tabindex="0"
+      ></div>
+
+      <main id="workspace" class="workspace">
+        <section class="editor-pane" aria-labelledby="editor-heading">
+          <div class="pane-heading">
+            <h2 id="editor-heading">My notes</h2>
+            <input
+              id="note-title"
+              type="text"
+              aria-label="Card title"
+              placeholder="Card title"
+            />
+          </div>
+          <div id="editor-host"></div>
+        </section>
+        <div
+          id="workspace-splitter"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize editor and preview panes"
+          aria-valuenow="50"
+          tabindex="0"
+        ></div>
+        <section class="preview-pane" aria-labelledby="preview-heading">
+          <div class="pane-heading">
+            <h2 id="preview-heading">Preview</h2>
+          </div>
+          <div id="preview" class="preview markdown-body"></div>
+        </section>
+      </main>
+
+      <section
+        id="conflict-panel"
+        class="conflict-panel"
+        hidden="hidden"
+        aria-labelledby="conflict-heading"
+      >
+        <div class="conflict-heading">
+          <h2 id="conflict-heading">The card changed elsewhere</h2>
+          <p>Both versions are preserved. Choose which note body to keep.</p>
+        </div>
+        <div class="version-grid">
+          <div class="version">
+            <h3>Original baseline</h3>
+            <pre id="base-version"></pre>
+          </div>
+          <div class="version">
+            <h3>Obsidian version</h3>
+            <pre id="disk-version"></pre>
+          </div>
+          <div class="version">
+            <h3>Zotero editor version</h3>
+            <pre id="local-version"></pre>
+          </div>
+        </div>
+        <div class="diff-grid">
+          <div class="version">
+            <h3>Obsidian changes vs baseline</h3>
+            <pre id="disk-diff"></pre>
+          </div>
+          <div class="version">
+            <h3>Zotero changes vs baseline</h3>
+            <pre id="local-diff"></pre>
+          </div>
+        </div>
+        <div class="conflict-actions">
+          <button id="use-disk" type="button">Use Obsidian version</button>
+          <button id="keep-local" class="primary" type="button">
+            Keep Zotero version
+          </button>
+        </div>
+      </section>
+
+      <dialog id="recovery-dialog" aria-labelledby="recovery-heading">
+        <div class="recovery-dialog-content">
+          <div class="conflict-heading">
+            <h2 id="recovery-heading">Recovery copies</h2>
+            <p id="recovery-description"></p>
+          </div>
+          <label for="recovery-select" id="recovery-label">Saved copy</label>
+          <select id="recovery-select"></select>
+          <pre id="recovery-preview" class="recovery-preview"></pre>
+          <div id="recovery-status" role="status" aria-live="polite"></div>
+          <div class="conflict-actions">
+            <button id="restore-copy" class="primary" type="button">
+              Restore selected copy
+            </button>
+            <button id="close-recovery" type="button">Close</button>
+          </div>
+        </div>
+      </dialog>
+
+      <footer class="statusbar">
+        <div id="status" role="status" aria-live="polite" data-state="idle">
+          Loading...
+        </div>
+        <button id="save-now" class="primary" type="button">Save</button>
+      </footer>
+    </div>
+  </body>
+</html>

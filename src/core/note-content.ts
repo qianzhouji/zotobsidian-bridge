@@ -1,4 +1,8 @@
-import { parseMarkdownFrontmatter } from "./markdown.ts";
+import {
+  parseMarkdownFrontmatter,
+  readFrontmatterValue,
+  updateAnnotationCardMetadata,
+} from "./markdown.ts";
 
 const sourceStart = "<!-- zotero-obsidian-bridge:source:start -->";
 const sourceEnd = "<!-- zotero-obsidian-bridge:source:end -->";
@@ -7,6 +11,11 @@ const notesHeading = "## My notes";
 export interface UserNoteContent {
   title: string;
   markdown: string;
+}
+
+interface NotesSection {
+  headingLine: number;
+  beforeSource: boolean;
 }
 
 function locateSourceMarkers(body: string): { start: number; end: number } {
@@ -35,24 +44,43 @@ function locateSourceMarkers(body: string): { start: number; end: number } {
   return { start: markers[0].index, end: markers[1].index };
 }
 
+function locateNotesSection(
+  lines: string[],
+  source: { start: number; end: number },
+): NotesSection {
+  const find = (start: number, end: number) => {
+    for (let index = start; index < end; index++) {
+      if (lines[index].replace(/\r?\n$/, "") === notesHeading) return index;
+    }
+    return -1;
+  };
+  const beforeSource = find(0, source.start);
+  if (beforeSource >= 0) {
+    return { headingLine: beforeSource, beforeSource: true };
+  }
+  const afterSource = find(source.end + 1, lines.length);
+  if (afterSource >= 0) {
+    return { headingLine: afterSource, beforeSource: false };
+  }
+  throw new Error("Card has no user-owned 'My notes' section.");
+}
+
 export function readUserNoteContent(markdown: string): UserNoteContent {
   const parsed = parseMarkdownFrontmatter(markdown);
   const markers = locateSourceMarkers(parsed.body);
   const lines = parsed.body.match(/[^\n]*\n|[^\n]+$/g) ?? [];
-  let headingLine = -1;
-  for (let index = markers.end + 1; index < lines.length; index++) {
-    if (lines[index].replace(/\r?\n$/, "") === notesHeading) {
-      headingLine = index;
-      break;
-    }
-  }
-  if (headingLine < 0) {
-    throw new Error("Card has no user-owned 'My notes' section.");
-  }
-
-  let userMarkdown = lines.slice(headingLine + 1).join("");
+  const section = locateNotesSection(lines, markers);
+  let userMarkdown = lines
+    .slice(
+      section.headingLine + 1,
+      section.beforeSource ? markers.start : lines.length,
+    )
+    .join("");
   if (userMarkdown.startsWith("\n")) userMarkdown = userMarkdown.slice(1);
-  const title = parsed.document.get("note_title");
+  if (section.beforeSource && userMarkdown.endsWith("\n\n")) {
+    userMarkdown = userMarkdown.slice(0, -2);
+  }
+  const title = readFrontmatterValue(markdown, "note_title");
   return {
     title: typeof title === "string" ? title : "",
     markdown: userMarkdown,
@@ -76,19 +104,18 @@ export function replaceUserNoteContent(
   const parsed = parseMarkdownFrontmatter(markdown);
   const markers = locateSourceMarkers(parsed.body);
   const lines = parsed.body.match(/[^\n]*\n|[^\n]+$/g) ?? [];
-  let headingLine = -1;
-  for (let index = markers.end + 1; index < lines.length; index++) {
-    if (lines[index].replace(/\r?\n$/, "") === notesHeading) {
-      headingLine = index;
-      break;
-    }
+  const section = locateNotesSection(lines, markers);
+  const noteSection = `${notesHeading}\n\n${content.markdown}${content.markdown ? "\n\n" : ""}`;
+  const body = section.beforeSource
+    ? `${lines.slice(0, section.headingLine).join("")}${noteSection}${lines.slice(markers.start).join("")}`
+    : `${lines.slice(0, markers.start).join("")}${noteSection}${lines.slice(markers.start, section.headingLine).join("")}`;
+  const withUpdatedBody = `---\n${parsed.document.toString({ lineWidth: 0 })}---${body}`;
+  if (readFrontmatterValue(markdown, "type") === "zotero-annotation") {
+    return updateAnnotationCardMetadata(withUpdatedBody, {
+      note_title: content.title.trim() || null,
+    });
   }
-  if (headingLine < 0) {
-    throw new Error("Card has no user-owned 'My notes' section.");
-  }
-
   parsed.document.set("note_title", content.title.trim() || null);
-  const body = `${lines.slice(0, headingLine).join("")}${notesHeading}\n${content.markdown}`;
   return `---\n${parsed.document.toString({ lineWidth: 0 })}---${body}`;
 }
 

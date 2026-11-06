@@ -8,7 +8,7 @@ The default is `Zotero Literature`.
 ```text
 <output folder>/<paper title> (<library type>-<library ID>-<item key>)/
   Paper.md
-  Annotations/<annotation key>.md
+  Annotations/P<PDF physical page>N<page-local ordinal>.md
   Notes/<note title> (<note key>).md
 
 <output folder>/Standalone Notes (<library type>-<library ID>)/
@@ -20,6 +20,12 @@ disambiguating suffix. Filenames are normalized, control characters and path
 separators are removed, and each vault path is checked to remain below the
 configured vault. Symlinks encountered below the vault root are rejected.
 
+Annotation cards use names such as `P01N01.md`, `P01N02.md`, and `P02N01.md`.
+`P` is the PDF's one-based physical page number, not the printed page label;
+`N` is the next unused ordinal on that physical page. Existing cards are not
+renumbered when another annotation is removed, so filenames remain stable. An
+annotation without a known PDF page uses `P00N01.md`.
+
 ## Identity
 
 The persistent annotation identity is
@@ -28,18 +34,30 @@ uses `<library type>:<library type ID>/note/<note key>`. Neither identity uses
 Zotero's local numeric item ID. Group libraries with the same item key
 therefore remain distinct.
 
-Annotation and native-note Markdown files have YAML frontmatter containing:
+Annotation cards expose only `paper_title` as a Bridge-managed Obsidian
+property. Other Bridge synchronization metadata is stored in an empty inline
+HTML element with a Base64 `data-payload` attribute. Obsidian Reading View and
+Live Preview render this as an empty span; Source mode intentionally shows the
+raw Markdown carrier. The companion can still validate identity and update
+source fields without filling Obsidian's Properties panel. Native-note and
+paper overview metadata continue to use their existing formats. Legacy
+annotation cards with Bridge/Zotero fields in YAML, the transitional HTML
+comment carrier, or the earlier `display:none` div carrier remain readable;
+their next successful Bridge source update moves the metadata to the v4 span.
+A legacy `<annotation key>.md` path moves to its `PxxNxx.md` name on that
+update. The rename keeps the card UUID and user-authored body intact.
 
-| Field               | Owner  | Meaning                                                      |
-| ------------------- | ------ | ------------------------------------------------------------ |
-| `bridge_schema`     | Bridge | File-format version; currently `1`                           |
-| `bridge_card_id`    | Bridge | UUID that stays with the card when the file is moved         |
-| `bridge_source_id`  | Bridge | Stable Zotero library/annotation or note identity            |
-| `bridge_updated_at` | Bridge | Last bridge metadata update timestamp                        |
-| `zotero_*`          | Bridge | Source library, item, attachment/note, title, and URI fields |
-| `type`              | Bridge | `zotero-note` for native Zotero note cards                   |
-| `note_title`        | User   | Optional title edited in the Zotero Markdown window          |
-| Other fields        | User   | Preserved by source-field updates                            |
+The legacy annotation YAML fields were:
+
+| Field               | Owner  | Meaning                                                 |
+| ------------------- | ------ | ------------------------------------------------------- |
+| `bridge_schema`     | Bridge | Card identity schema; currently `1`                     |
+| `bridge_card_id`    | Bridge | UUID that stays with the card when the file is moved    |
+| `bridge_source_id`  | Bridge | Stable Zotero library/annotation identity               |
+| `bridge_updated_at` | Bridge | Last Bridge metadata update timestamp                   |
+| `zotero_*`          | Bridge | Source library, item, attachment, and URI fields        |
+| `type`              | Bridge | Annotation-card discriminator                           |
+| Other fields        | User   | Preserved and not migrated or removed by source updates |
 
 The Zotero data directory stores `storage/zotero-obsidian-bridge/cards.json`
 and `sync-tasks.json`. The card index maps source IDs to card UUIDs and
@@ -52,9 +70,10 @@ in the index are relative, not absolute.
 
 ## Ownership boundary
 
-Annotation cards place Zotero-derived excerpt, comment, page, and source link;
-native-note cards place the converted Zotero note body and source link between
-these exact markers:
+Annotation cards place the user-owned `## My notes` section first, followed by
+the Zotero-derived excerpt, comment, page, and source link. Native-note cards
+place the converted Zotero note body and source link between these exact
+markers:
 
 ```md
 <!-- zotero-obsidian-bridge:source:start -->
@@ -64,10 +83,15 @@ these exact markers:
 <!-- zotero-obsidian-bridge:source:end -->
 ```
 
-`## My notes` follows the source block and is user-owned. Source updates parse
-the leading YAML document and the marker pair outside Markdown code fences.
-They preserve all non-bridge frontmatter fields and every byte of the
-user-owned body. Missing, duplicate, malformed, or ambiguous boundaries are
+`## My notes` is user-owned. New annotation cards place it before the source
+block; older source-first annotation cards remain readable, and the next user
+edit or successful source update moves the section to the new order without
+changing its text. Source updates parse the leading YAML document and marker
+pair outside Markdown code fences. They preserve all non-bridge frontmatter
+fields and the user-owned body.
+During annotation-card migration, Bridge-owned YAML fields move into the
+hidden metadata carrier while unknown user properties and the note body are
+preserved. Missing, duplicate, malformed, or ambiguous boundaries are
 conflicts, not permission to overwrite. Native-note imports use the same
 boundary: a re-import refreshes only Zotero-owned note content and preserves
 the Obsidian-owned section. Markdown edits are not written back to Zotero's
@@ -89,6 +113,11 @@ While the editor is open, it checks the vault at bounded intervals and when the
 window regains focus. Changes to Zotero-owned source metadata are merged without
 conflicting with the note body. If the vault becomes unavailable, the local
 draft remains editable and is retried when the vault can be read again.
+
+The expanded editor shows a compact, white Zotero-source panel. The annotation
+color is applied to the quoted excerpt instead of being printed as a color-code
+label. The source panel and the editor/preview split can be resized by dragging
+their dividers; the layout is remembered for subsequent editor windows.
 
 Markdown preview disables raw HTML and does not load remote images. Inline
 `$...$` and block `$$...$$` math are rendered through KaTeX with trust disabled

@@ -1,6 +1,7 @@
 import katex from "katex";
 import MarkdownIt from "markdown-it";
 import type { MarkdownIt as MarkdownItType } from "markdown-it";
+import { installNoteLinks } from "./note-links.ts";
 
 export function createMarkdownRenderer(): MarkdownItType {
   const renderer = new MarkdownIt({
@@ -12,6 +13,7 @@ export function createMarkdownRenderer(): MarkdownItType {
   const validateLink = renderer.validateLink.bind(renderer);
   renderer.validateLink = (url) =>
     /^(?:zotero|obsidian):\/\//i.test(url) || validateLink(url);
+  installNoteLinks(renderer);
 
   renderer.inline.ruler.before("escape", "math_inline", (state, silent) => {
     const start = state.pos;

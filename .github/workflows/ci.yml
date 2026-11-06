@@ -56,6 +56,16 @@ jobs:
       - name: Run focused regression suites
         run: |
           npm run test:native-note
+          npm run test:card-format
+          npm run test:editor-session
+          npm run test:b5-recovery
+          npm run test:note-links
+          npm run test:note-query
+          npm run test:note-navigation
+          npm run test:reader-popup-prototype
+          npm run test:pending-card-drafts
+          npm run test:companion-queue
+          npm run test:card-markdown-preview
           npm run test:companion-protocol
           npm run test:image-resource
           npm run test:auto-enrollment

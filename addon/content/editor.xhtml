@@ -3,9 +3,9 @@
 href="chrome://zoteroobsidianbridge/content/katex.min.css" type="text/css"?>
 <?xml-stylesheet href="chrome://zoteroobsidianbridge/content/editor.css"
 type="text/css"?>
-<!DOCTYPE window>
-<window
-  xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+<!DOCTYPE html>
+<html
+  xmlns="http://www.w3.org/1999/xhtml"
   xmlns:html="http://www.w3.org/1999/xhtml"
   id="zotero-obsidian-bridge-editor"
   title="Zotero Obsidian Bridge - Markdown editor"
@@ -15,6 +15,7 @@ type="text/css"?>
 >
   <html:head>
     <html:meta charset="utf-8" />
+    <html:title>Zotero Obsidian Bridge - Markdown editor</html:title>
     <html:script
       src="chrome://zoteroobsidianbridge/content/scripts/zoteroobsidianbridge-editor.js"
     />
@@ -42,7 +43,11 @@ type="text/css"?>
         </html:nav>
       </html:header>
 
-      <html:section class="source-section" aria-labelledby="source-heading">
+      <html:section
+        id="source-section"
+        class="source-section"
+        aria-labelledby="source-heading"
+      >
         <html:div class="section-heading">
           <html:h2 id="source-heading">Zotero source</html:h2>
           <html:span>Read only</html:span>
@@ -52,8 +57,16 @@ type="text/css"?>
           class="source-preview markdown-body"
         ></html:div>
       </html:section>
+      <html:div
+        id="source-splitter"
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label="Resize Zotero source panel"
+        aria-valuenow="112"
+        tabindex="0"
+      />
 
-      <html:main class="workspace">
+      <html:main id="workspace" class="workspace">
         <html:section class="editor-pane" aria-labelledby="editor-heading">
           <html:div class="pane-heading">
             <html:h2 id="editor-heading">My notes</html:h2>
@@ -66,6 +79,14 @@ type="text/css"?>
           </html:div>
           <html:div id="editor-host"></html:div>
         </html:section>
+        <html:div
+          id="workspace-splitter"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize editor and preview panes"
+          aria-valuenow="50"
+          tabindex="0"
+        />
         <html:section class="preview-pane" aria-labelledby="preview-heading">
           <html:div class="pane-heading">
             <html:h2 id="preview-heading">Preview</html:h2>
@@ -156,4 +177,4 @@ type="text/css"?>
       </html:footer>
     </html:div>
   </html:body>
-</window>
+</html>

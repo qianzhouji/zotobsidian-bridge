@@ -67,6 +67,42 @@ assert.equal(
   validateCompanionRequest(request, "Zotero Literature").relativePath,
   request.relativePath,
 );
+const legacyV2Request = { ...request, protocolVersion: 2 };
+assert.equal(
+  validateCompanionRequest(legacyV2Request, "Zotero Literature")
+    .protocolVersion,
+  2,
+);
+const moveRequest = {
+  ...request,
+  protocolVersion: 3,
+  operation: "move",
+  relativePath: "Zotero Literature/Paper/Annotations/P03N01.md",
+  moveFromRelativePath: request.relativePath,
+  recoveryRelativePath: undefined,
+  recoveryContent: undefined,
+};
+assert.equal(
+  validateCompanionRequest(moveRequest, "Zotero Literature")
+    .moveFromRelativePath,
+  request.relativePath,
+);
+assert.throws(
+  () =>
+    validateCompanionRequest(
+      { ...moveRequest, protocolVersion: 2 },
+      "Zotero Literature",
+    ),
+  /malformed or incompatible/,
+);
+assert.throws(
+  () =>
+    validateCompanionRequest(
+      { ...moveRequest, moveFromRelativePath: "../outside.md" },
+      "Zotero Literature",
+    ),
+  /normalized Vault-relative paths/,
+);
 const noteCardId = "b60f00a9-934b-48db-8b52-53045bb3fd79";
 const nativeNoteRequest = {
   ...request,

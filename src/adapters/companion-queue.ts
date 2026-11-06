@@ -1,12 +1,13 @@
 import {
-  type CompanionOperation,
   type CompanionImageMimeType,
   type CompanionResourceRequest,
   type CompanionWriteRequest,
   type CompanionWriteResponse,
+  type CompanionProtocolVersion,
   COMPANION_PROTOCOL_VERSION,
   normalizeVaultRelativePath,
   validateCompanionAck,
+  validateCompanionRequest,
   validateCompanionResponse,
 } from "./companion-protocol.ts";
 
@@ -32,6 +33,22 @@ export type CompanionRequestOutcome =
   | { status: "conflict"; message: string }
   | { status: "completed" };
 
+const recentRequestOutcomes = new Map<string, CompanionRequestOutcome>();
+const createRequestTails = new Map<string, Promise<void>>();
+
+function rememberRequestOutcome(
+  requestId: string,
+  outcome: CompanionRequestOutcome,
+): void {
+  recentRequestOutcomes.delete(requestId);
+  recentRequestOutcomes.set(requestId, outcome);
+  while (recentRequestOutcomes.size > 256) {
+    const oldest = recentRequestOutcomes.keys().next().value;
+    if (oldest === undefined) break;
+    recentRequestOutcomes.delete(oldest);
+  }
+}
+
 function queueDirectory(): string {
   const value = Zotero.Prefs.get(`${prefPrefix}.companionQueuePath`, true);
   const path = typeof value === "string" ? value.trim() : "";
@@ -49,6 +66,8 @@ export async function getCompanionRequestOutcome(
   if (!/^[0-9a-f-]{36}$/i.test(requestId)) {
     throw new Error("Invalid companion request ID.");
   }
+  const recent = recentRequestOutcomes.get(requestId);
+  if (recent) return recent;
   const root = queueDirectory();
   const responsePath = PathUtils.join(root, "responses", `${requestId}.json`);
   if (await IOUtils.exists(responsePath)) {
@@ -109,9 +128,10 @@ async function writeNewBinary(
 async function writeCompanionAck(
   ackPath: string,
   requestId: string,
+  protocolVersion: CompanionProtocolVersion = COMPANION_PROTOCOL_VERSION,
 ): Promise<void> {
   const ack = {
-    protocolVersion: COMPANION_PROTOCOL_VERSION,
+    protocolVersion,
     requestId,
     acknowledgedAt: new Date().toISOString(),
   };
@@ -119,12 +139,47 @@ async function writeCompanionAck(
     await writeNewJSON(ackPath, ack);
   } catch (error) {
     if (!(await IOUtils.exists(ackPath))) throw error;
-    validateCompanionAck(await IOUtils.readJSON(ackPath), requestId);
+    validateCompanionAck(
+      await IOUtils.readJSON(ackPath),
+      requestId,
+      protocolVersion,
+    );
   }
 }
 
-export async function submitCompanionWrite(input: {
-  operation: Exclude<CompanionOperation, "create-resource">;
+async function findPendingCreateRequest(input: {
+  sourceId: string;
+  targetVaultId: string;
+  outputFolder: string;
+}): Promise<CompanionWriteRequest | null> {
+  const requestDirectory = PathUtils.join(queueDirectory(), "requests");
+  const paths = await IOUtils.getChildren(requestDirectory, {
+    ignoreAbsent: true,
+  });
+  for (const path of paths) {
+    const filename = PathUtils.split(path).at(-1) ?? "";
+    if (!/^[0-9a-f-]{36}\.json$/i.test(filename)) continue;
+    try {
+      const request = validateCompanionRequest(
+        await IOUtils.readJSON(path),
+        input.outputFolder,
+      );
+      if (
+        request.operation === "create" &&
+        request.sourceId === input.sourceId &&
+        request.targetVaultId === input.targetVaultId
+      ) {
+        return request;
+      }
+    } catch {
+      // Leave malformed or unrelated requests for the regular recovery flow.
+    }
+  }
+  return null;
+}
+
+async function submitCompanionWriteUnlocked(input: {
+  operation: "create" | "replace";
   cardId: string;
   sourceId: string;
   targetVaultId: string;
@@ -136,6 +191,40 @@ export async function submitCompanionWrite(input: {
   recoveryContent?: string;
 }): Promise<void> {
   const root = queueDirectory();
+  if (input.operation === "create") {
+    const existing = await findPendingCreateRequest(input);
+    if (existing) {
+      const responsePath = PathUtils.join(
+        root,
+        "responses",
+        `${existing.requestId}.json`,
+      );
+      const ackPath = PathUtils.join(
+        root,
+        "acks",
+        `${existing.requestId}.json`,
+      );
+      const deadline = Date.now() + responseTimeoutMs;
+      while (Date.now() < deadline) {
+        if (await IOUtils.exists(responsePath)) {
+          const response = validateCompanionResponse(
+            await IOUtils.readJSON(responsePath),
+            existing.requestId,
+            COMPANION_PROTOCOL_VERSION,
+          );
+          if (response.status === "conflict") {
+            await writeCompanionAck(ackPath, existing.requestId);
+            throw new Error(
+              response.message || "Obsidian rejected the existing card create.",
+            );
+          }
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+      }
+      throw new CompanionPendingError(existing.requestId);
+    }
+  }
   const requestId = crypto.randomUUID();
   const request: CompanionWriteRequest = {
     protocolVersion: COMPANION_PROTOCOL_VERSION,
@@ -159,11 +248,99 @@ export async function submitCompanionWrite(input: {
       const response = validateCompanionResponse(
         await IOUtils.readJSON(responsePath),
         requestId,
+        COMPANION_PROTOCOL_VERSION,
       );
       if (response.status === "conflict") {
         await writeCompanionAck(ackPath, requestId);
         throw new Error(
           response.message || "Obsidian rejected the Vault write.",
+        );
+      }
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+  }
+  throw new CompanionPendingError(requestId);
+}
+
+export async function submitCompanionWrite(input: {
+  operation: "create" | "replace";
+  cardId: string;
+  sourceId: string;
+  targetVaultId: string;
+  outputFolder: string;
+  relativePath: string;
+  baseRevision: string | null;
+  content: string;
+  recoveryRelativePath?: string;
+  recoveryContent?: string;
+}): Promise<void> {
+  if (input.operation !== "create") return submitCompanionWriteUnlocked(input);
+  const lockKey = JSON.stringify([input.targetVaultId, input.sourceId]);
+  const previous = createRequestTails.get(lockKey) ?? Promise.resolve();
+  const operation = previous.then(
+    () => submitCompanionWriteUnlocked(input),
+    () => submitCompanionWriteUnlocked(input),
+  );
+  const tail = operation.then(
+    () => undefined,
+    () => undefined,
+  );
+  createRequestTails.set(lockKey, tail);
+  try {
+    await operation;
+  } finally {
+    if (createRequestTails.get(lockKey) === tail) {
+      createRequestTails.delete(lockKey);
+    }
+  }
+}
+
+export async function submitCompanionMove(input: {
+  cardId: string;
+  sourceId: string;
+  targetVaultId: string;
+  outputFolder: string;
+  relativePath: string;
+  moveFromRelativePath: string;
+  baseRevision: string;
+  content: string;
+}): Promise<void> {
+  const root = queueDirectory();
+  const requestId = crypto.randomUUID();
+  const request: CompanionWriteRequest = {
+    protocolVersion: COMPANION_PROTOCOL_VERSION,
+    requestId,
+    createdAt: new Date().toISOString(),
+    operation: "move",
+    cardId: input.cardId,
+    sourceId: input.sourceId,
+    targetVaultId: input.targetVaultId,
+    outputFolder: normalizeVaultRelativePath(input.outputFolder),
+    relativePath: normalizeVaultRelativePath(input.relativePath),
+    moveFromRelativePath: normalizeVaultRelativePath(
+      input.moveFromRelativePath,
+    ),
+    baseRevision: input.baseRevision,
+    content: input.content,
+  };
+  const requestPath = PathUtils.join(root, "requests", `${requestId}.json`);
+  const responsePath = PathUtils.join(root, "responses", `${requestId}.json`);
+  const ackPath = PathUtils.join(root, "acks", `${requestId}.json`);
+  await writeNewJSON(requestPath, request);
+
+  const deadline = Date.now() + responseTimeoutMs;
+  while (Date.now() < deadline) {
+    if (await IOUtils.exists(responsePath)) {
+      const response = validateCompanionResponse(
+        await IOUtils.readJSON(responsePath),
+        requestId,
+        COMPANION_PROTOCOL_VERSION,
+      );
+      if (response.status === "conflict") {
+        await writeCompanionAck(ackPath, requestId);
+        throw new Error(
+          response.message || "Obsidian rejected the Vault move.",
         );
       }
       return;
@@ -218,6 +395,7 @@ export async function submitCompanionResource(input: {
       const response = validateCompanionResponse(
         await IOUtils.readJSON(responsePath),
         requestId,
+        COMPANION_PROTOCOL_VERSION,
       );
       if (response.status === "conflict") {
         await writeCompanionAck(ackPath, requestId);
@@ -243,6 +421,32 @@ export async function hasPendingCompanionRequests(): Promise<boolean> {
   );
 }
 
+export async function hasPendingCompanionRequest(
+  sourceID: string,
+  operations?: ReadonlySet<string>,
+): Promise<boolean> {
+  const requestDirectory = PathUtils.join(queueDirectory(), "requests");
+  const paths = await IOUtils.getChildren(requestDirectory, {
+    ignoreAbsent: true,
+  });
+  for (const path of paths) {
+    const filename = PathUtils.split(path).at(-1) ?? "";
+    if (!/^[0-9a-f-]{36}\.json$/i.test(filename)) continue;
+    try {
+      const request = await IOUtils.readJSON(path);
+      if (
+        request?.sourceId === sourceID &&
+        (!operations || operations.has(request.operation))
+      ) {
+        return true;
+      }
+    } catch {
+      // Malformed requests remain owned by the queue recovery path.
+    }
+  }
+  return false;
+}
+
 export async function acknowledgeCompanionResponses(
   beforeAcknowledge: (sourceIDs: string[]) => Promise<void>,
 ): Promise<string[]> {
@@ -254,7 +458,11 @@ export async function acknowledgeCompanionResponses(
     ignoreAbsent: true,
   });
   const reconciledSources = new Set<string>();
-  const acknowledgements: Array<{ requestId: string; path: string }> = [];
+  const acknowledgements: Array<{
+    requestId: string;
+    path: string;
+    version: CompanionProtocolVersion;
+  }> = [];
 
   for (const responsePath of responsePaths) {
     const requestId = PathUtils.split(responsePath)
@@ -275,6 +483,12 @@ export async function acknowledgeCompanionResponses(
     } catch {
       continue;
     }
+    rememberRequestOutcome(
+      requestId,
+      response.status === "applied"
+        ? { status: "applied", revision: response.revision }
+        : { status: "conflict", message: response.message },
+    );
     if (response.status === "applied") {
       try {
         const request = (await IOUtils.readJSON(
@@ -301,14 +515,18 @@ export async function acknowledgeCompanionResponses(
         continue;
       }
     }
-    acknowledgements.push({ requestId, path: ackPath });
+    acknowledgements.push({
+      requestId,
+      path: ackPath,
+      version: response.protocolVersion,
+    });
   }
 
   const sourceIDs = [...reconciledSources];
   if (sourceIDs.length > 0) await beforeAcknowledge(sourceIDs);
 
-  for (const { requestId, path } of acknowledgements) {
-    await writeCompanionAck(path, requestId);
+  for (const { requestId, path, version } of acknowledgements) {
+    await writeCompanionAck(path, requestId, version);
   }
   return sourceIDs;
 }

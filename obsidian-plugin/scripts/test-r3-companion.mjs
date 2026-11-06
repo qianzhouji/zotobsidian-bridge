@@ -8,6 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import vm from "node:vm";
+import { hasSameMarkdownExceptUpdatedAt } from "../../src/core/markdown.ts";
 
 const output = path.resolve(".scaffold/obsidian-plugin/main.js");
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "zob-r3-test-"));
@@ -115,6 +116,8 @@ const mockCreateImageBitmap = async () => {
 vm.runInNewContext(await fs.readFile(output, "utf8"), {
   Buffer,
   Blob: globalThis.Blob,
+  atob: globalThis.atob,
+  btoa: globalThis.btoa,
   clearInterval,
   clearTimeout,
   crypto: globalThis.crypto,
@@ -125,6 +128,8 @@ vm.runInNewContext(await fs.readFile(output, "utf8"), {
   require: runtimeRequire,
   setInterval: () => 1,
   setTimeout,
+  TextDecoder: globalThis.TextDecoder,
+  TextEncoder: globalThis.TextEncoder,
   window: { setInterval: () => 1 },
 });
 const PluginClass = moduleShim.exports.default;
@@ -159,6 +164,11 @@ async function createApp(vaultRoot) {
     async createFolder(folderPath) {
       await fs.mkdir(path.join(vaultRoot, folderPath), { recursive: true });
     },
+    async rename(file, newPath) {
+      const destination = path.join(vaultRoot, newPath);
+      await fs.mkdir(path.dirname(destination), { recursive: true });
+      await fs.rename(path.join(vaultRoot, file.path), destination);
+    },
     async process(file, callback) {
       const absolutePath = path.join(vaultRoot, file.path);
       const current = await fs.readFile(absolutePath, "utf8");
@@ -178,6 +188,11 @@ async function createApp(vaultRoot) {
     leaves,
     app: {
       vault,
+      fileManager: {
+        async renameFile(file, newPath) {
+          await vault.rename(file, newPath);
+        },
+      },
       workspace: {
         containerEl: {
           ownerDocument: {
@@ -322,6 +337,139 @@ try {
   const targetPath = path.join(vaultRoot, offlineRequest.relativePath);
   assert.equal(await fs.readFile(targetPath, "utf8"), offlineRequest.content);
 
+  const legacyCardId = randomUUID();
+  const legacySourceId = "user:0/annotation/OLD001";
+  const legacyPath = "Zotero Literature/Paper/Annotations/OLD001.md";
+  const numberedPath = "Zotero Literature/Paper/Annotations/P03N01.md";
+  const legacyContent = `---\ntype: zotero-annotation\nbridge_card_id: ${legacyCardId}\nbridge_source_id: ${legacySourceId}\n---\n\nLegacy user notes.\n`;
+  const legacyCreate = {
+    ...makeRequest({
+      cardId: legacyCardId,
+      content: legacyContent,
+      targetVaultId: vaultId,
+    }),
+    sourceId: legacySourceId,
+    relativePath: legacyPath,
+  };
+  await enqueue(queueDirectory, legacyCreate);
+  await plugin.processQueue();
+  assert.equal(
+    (await responseFor(queueDirectory, legacyCreate.requestId)).protocolVersion,
+    2,
+  );
+
+  const legacyMove = {
+    ...legacyCreate,
+    protocolVersion: 3,
+    requestId: randomUUID(),
+    operation: "move",
+    moveFromRelativePath: legacyPath,
+    relativePath: numberedPath,
+    baseRevision: sha256(legacyContent),
+    recoveryRelativePath: undefined,
+    recoveryContent: undefined,
+  };
+  leaves.push({ view: new MarkdownView(new TFile(legacyPath)) });
+  await enqueue(queueDirectory, legacyMove);
+  await plugin.processQueue();
+  assert.equal(
+    await fs.readFile(path.join(vaultRoot, legacyPath), "utf8"),
+    legacyContent,
+  );
+  assert.equal(
+    await fs
+      .access(
+        path.join(queueDirectory, "responses", `${legacyMove.requestId}.json`),
+      )
+      .then(() => true)
+      .catch(() => false),
+    false,
+  );
+  leaves.length = 0;
+  plugin.retryState.clear();
+  await plugin.processQueue();
+  const legacyMoveResponse = await responseFor(
+    queueDirectory,
+    legacyMove.requestId,
+  );
+  assert.equal(legacyMoveResponse.protocolVersion, 3);
+  assert.equal(
+    legacyMoveResponse.status,
+    "applied",
+    legacyMoveResponse.message,
+  );
+  assert.equal(
+    await fs.readFile(path.join(vaultRoot, numberedPath), "utf8"),
+    legacyContent,
+  );
+  assert.equal(
+    await fs
+      .access(path.join(vaultRoot, legacyPath))
+      .then(() => true)
+      .catch(() => false),
+    false,
+  );
+
+  const replayedMove = {
+    ...legacyMove,
+    requestId: randomUUID(),
+  };
+  await enqueue(queueDirectory, replayedMove);
+  await plugin.processQueue();
+  assert.equal(
+    (await responseFor(queueDirectory, replayedMove.requestId)).status,
+    "applied",
+  );
+  assert.equal(
+    await fs.readFile(path.join(vaultRoot, numberedPath), "utf8"),
+    legacyContent,
+  );
+
+  const conflictCardId = randomUUID();
+  const conflictSourceId = "user:0/annotation/MOVECONFLICT";
+  const conflictSourcePath =
+    "Zotero Literature/Paper/Annotations/MOVECONFLICT.md";
+  const occupiedTargetPath = "Zotero Literature/Paper/Annotations/P99N99.md";
+  const conflictSourceContent = `---\nbridge_card_id: ${conflictCardId}\nbridge_source_id: ${conflictSourceId}\n---\nSource must remain.\n`;
+  const occupiedTargetContent = `---\nbridge_card_id: ${randomUUID()}\nbridge_source_id: user:0/annotation/OCCUPIED\n---\nTarget must remain.\n`;
+  await app.vault.create(conflictSourcePath, conflictSourceContent);
+  await app.vault.create(occupiedTargetPath, occupiedTargetContent);
+  const occupiedMove = {
+    ...legacyMove,
+    protocolVersion: 3,
+    requestId: randomUUID(),
+    operation: "move",
+    cardId: conflictCardId,
+    sourceId: conflictSourceId,
+    moveFromRelativePath: conflictSourcePath,
+    relativePath: occupiedTargetPath,
+    baseRevision: sha256(conflictSourceContent),
+    content: conflictSourceContent,
+  };
+  await enqueue(queueDirectory, occupiedMove);
+  await plugin.processQueue();
+  assert.equal(
+    (await responseFor(queueDirectory, occupiedMove.requestId)).status,
+    "conflict",
+  );
+  assert.equal(
+    await fs.readFile(path.join(vaultRoot, conflictSourcePath), "utf8"),
+    conflictSourceContent,
+  );
+  assert.equal(
+    await fs.readFile(path.join(vaultRoot, occupiedTargetPath), "utf8"),
+    occupiedTargetContent,
+  );
+  await fs.writeFile(
+    path.join(queueDirectory, "acks", `${occupiedMove.requestId}.json`),
+    JSON.stringify({
+      protocolVersion: 3,
+      requestId: occupiedMove.requestId,
+      acknowledgedAt: new Date().toISOString(),
+    }),
+  );
+  await plugin.processQueue();
+
   const duplicateIdentity = makeRequest({
     cardId: offlineRequest.cardId,
     content: offlineRequest.content.replace(
@@ -413,12 +561,19 @@ try {
     baseRevision: sha256(edited),
     targetVaultId: vaultId,
   });
+  const onDiskBeforeReplay = await fs.readFile(targetPath, "utf8");
+  assert.equal(onDiskBeforeReplay, firstTimestampedContent);
+  assert.equal(
+    hasSameMarkdownExceptUpdatedAt(onDiskBeforeReplay, replayRequest.content),
+    true,
+  );
   await enqueue(queueDirectory, replayRequest);
   await plugin.processQueue();
-  assert.equal(
-    (await responseFor(queueDirectory, replayRequest.requestId)).status,
-    "applied",
+  const replayResponse = await responseFor(
+    queueDirectory,
+    replayRequest.requestId,
   );
+  assert.equal(replayResponse.status, "applied", replayResponse.message);
   assert.equal(await fs.readFile(targetPath, "utf8"), firstTimestampedContent);
 
   const savedUserEdit = firstTimestampedContent.replace(
@@ -574,6 +729,10 @@ try {
   await fs.mkdir(ackDirectory, { recursive: true });
   for (const request of [
     offlineRequest,
+    legacyCreate,
+    legacyMove,
+    replayedMove,
+    occupiedMove,
     duplicateIdentity,
     replaceRequest,
     firstTimestampedRequest,
@@ -630,7 +789,7 @@ try {
   assert.equal(reenabledPlugin.status.text, "Zotero Bridge: connected");
   await reenabledPlugin.releaseQueueOwnership();
   process.stdout.write(
-    "R3/R4-B companion checks passed: binary resource verification and replay idempotency, corrupted payload rejection, ACK cleanup, Markdown recovery and conflict handling, editor deferral, Vault pairing, and single-owner enforcement.\n",
+    "Companion checks passed: v2 compatibility, v3 safe card moves and replay, binary resource verification, ACK cleanup, Markdown recovery/conflicts, editor deferral, Vault pairing, and single-owner enforcement.\n",
   );
 } finally {
   await plugin.releaseQueueOwnership();

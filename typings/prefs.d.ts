@@ -10,6 +10,7 @@ declare namespace _ZoteroTypes {
       "vaultPath": string;
       "outputFolder": string;
       "writerMode": string;
+      "readerMode": string;
       "companionQueuePath": string;
       "companionVaultId": string;
       "autoEnrollment": string;
