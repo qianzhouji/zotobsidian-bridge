@@ -11,6 +11,9 @@ declare namespace _ZoteroTypes {
       "outputFolder": string;
       "writerMode": string;
       "readerMode": string;
+      "desktopKnowledgeCards": boolean;
+      "inlineKnowledgeCardLines": boolean;
+      "desktopKnowledgeCardLines": boolean;
       "companionQueuePath": string;
       "companionVaultId": string;
       "autoEnrollment": string;

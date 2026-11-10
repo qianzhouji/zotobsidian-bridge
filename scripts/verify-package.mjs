@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -65,6 +66,7 @@ export function verifyPackage(xpiPath) {
     "content/editor.css",
     "content/batch-progress.xhtml",
     "content/batch-progress.css",
+    "content/desktop-knowledge-card-macos.xhtml",
     "content/katex.min.css",
     "content/katex-LICENSE.txt",
     "content/scripts/zoteroobsidianbridge.js",
@@ -76,6 +78,43 @@ export function verifyPackage(xpiPath) {
   for (const entry of requiredEntries) {
     if (!entrySet.has(entry)) {
       throw new Error(`Required XPI entry is missing: ${entry}`);
+    }
+  }
+
+  const nativeHelperPath = "content/native/macos/desktop-overlay-helper";
+  const nativeManifestPath = "content/native/macos/manifest.json";
+  if (entrySet.has(nativeHelperPath) !== entrySet.has(nativeManifestPath)) {
+    throw new Error(
+      "The macOS native helper and its manifest must ship together.",
+    );
+  }
+  if (entrySet.has(nativeHelperPath)) {
+    const helper = execFileSync(
+      "unzip",
+      ["-p", absoluteXpiPath, nativeHelperPath],
+      {
+        maxBuffer,
+      },
+    );
+    const nativeManifest = JSON.parse(
+      execFileSync("unzip", ["-p", absoluteXpiPath, nativeManifestPath], {
+        encoding: "utf8",
+        maxBuffer,
+      }),
+    );
+    const helperHash = createHash("sha256").update(helper).digest("hex");
+    if (
+      nativeManifest.protocolVersion !== 1 ||
+      nativeManifest.binary !== "desktop-overlay-helper" ||
+      nativeManifest.sha256 !== helperHash ||
+      !Array.isArray(nativeManifest.architectures) ||
+      !["arm64", "x86_64"].every((arch) =>
+        nativeManifest.architectures.includes(arch),
+      )
+    ) {
+      throw new Error(
+        "The packaged macOS native helper failed its manifest/hash audit.",
+      );
     }
   }
 
@@ -174,7 +213,11 @@ export function verifyPackage(xpiPath) {
     );
   }
 
-  return { entries: entries.length, warnings };
+  return {
+    entries: entries.length,
+    warnings,
+    includesNativeOverlayHelper: entrySet.has(nativeHelperPath),
+  };
 }
 
 if (
@@ -187,6 +230,9 @@ if (
   const result = verifyPackage(xpiPath);
   process.stdout.write(
     `Package audit passed: ${result.entries} archive entries in ${path.resolve(xpiPath)}.\n`,
+  );
+  process.stdout.write(
+    `macOS native overlay helper: ${result.includesNativeOverlayHelper ? "present and hash-verified" : "not packaged"}.\n`,
   );
   for (const warning of result.warnings) {
     process.stdout.write(`Release gate: ${warning}\n`);

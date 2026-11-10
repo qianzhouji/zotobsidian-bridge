@@ -220,6 +220,11 @@ assert.equal(
 );
 assert.equal(firstCard.querySelector("textarea"), null);
 assert.ok(firstCard.querySelector(".zob-knowledge-body .katex"));
+assert.match(
+  document.getElementById("zob-note-ui-style").textContent,
+  /\.zob-knowledge-body \.katex \.katex-mathml\{[^}]*clip-path:inset\(50%\)[^}]*position:absolute/s,
+  "knowledge cards must visually hide KaTeX's duplicate MathML while keeping it available to assistive technology",
+);
 firstCard
   .querySelector('.zob-knowledge-body [data-zob-note-link="Physics/Motion"]')
   .dispatchEvent(

@@ -6,14 +6,26 @@ import {
   type NoteQueryInputMap,
   type NoteQueryOperation,
   type NoteQueryResponse,
+  type NoteQueryResultMap,
   type NoteQueryStatus,
 } from "../core/note-query-protocol.ts";
+import {
+  knowledgeNoteMemoryCache,
+  type NoteQueryCacheScope,
+} from "../core/note-query-cache.ts";
 
 export interface NoteQueryTransport {
   read(relative: string, maxBytes: number): Promise<unknown | null>;
   publish(relative: string, value: unknown): Promise<void>;
   remove(relative: string): Promise<void>;
 }
+
+export interface NoteQueryScope {
+  vaultId: string;
+  pairingEpoch: string;
+  readFolders: string[];
+}
+
 export class NoteQueryError extends Error {
   status: NoteQueryStatus | "cancelled";
   constructor(status: NoteQueryStatus | "cancelled") {
@@ -31,15 +43,18 @@ export class NoteQueryClient {
   private transport: NoteQueryTransport;
   private vaultId: string;
   private createAbortController: () => AbortController;
+  readonly cachePartition: string;
 
   constructor(
     transport: NoteQueryTransport,
     vaultId: string,
     createAbortController = () => new AbortController(),
+    cachePartition = `session:${crypto.randomUUID()}`,
   ) {
     this.transport = transport;
     this.vaultId = vaultId;
     this.createAbortController = createAbortController;
+    this.cachePartition = cachePartition;
   }
   get inFlight(): number {
     return this.pending.size;
@@ -49,29 +64,91 @@ export class NoteQueryClient {
   }
   /** Permission identity for bounded, process-local read caches. */
   async scope(): Promise<string> {
+    const scope = await this.scopeIdentity();
+    return JSON.stringify([
+      scope.vaultId,
+      scope.pairingEpoch,
+      scope.readFolders,
+    ]);
+  }
+
+  /** Current authorization identity for window/session registration. */
+  async scopeIdentity(): Promise<NoteQueryScope> {
     if (this.closed) throw new NoteQueryError("cancelled");
-    const raw = await this.transport.read(
-      "capabilities.json",
-      L.maxRequestBytes,
-    );
-    if (!raw) throw new NoteQueryError("offline");
-    // Revocation must invalidate cached content even after the lease expires.
+    let raw: unknown | null;
+    try {
+      raw = await this.transport.read("capabilities.json", L.maxRequestBytes);
+    } catch {
+      raw = null;
+    }
+    if (!raw) {
+      const cached = knowledgeNoteMemoryCache.activeScope(this.cachePartition);
+      if (cached) return cached;
+      throw new NoteQueryError("offline");
+    }
+
     const value = raw as Partial<
       import("../core/note-query-protocol.ts").NoteQueryCapabilities
     >;
-    if (!value.enabled || value.targetVaultId !== this.vaultId)
+    if (!value.enabled || value.targetVaultId !== this.vaultId) {
+      knowledgeNoteMemoryCache.clearPartition(this.cachePartition);
       throw new NoteQueryError("forbidden");
-    let caps;
+    }
+    let caps: ReturnType<typeof validateNoteQueryCapabilities>;
     try {
       caps = validateNoteQueryCapabilities(raw);
     } catch {
-      throw new NoteQueryError("offline");
+      // An expired but structurally sound lease still identifies the last
+      // authorized scope. It may serve cached snapshots, never online reads.
+      if (!Number.isSafeInteger(value.updatedAt)) {
+        throw new NoteQueryError("offline");
+      }
+      try {
+        caps = validateNoteQueryCapabilities(raw, value.updatedAt as number);
+      } catch {
+        throw new NoteQueryError("offline");
+      }
+      if (caps.expiresAt > Date.now()) throw new NoteQueryError("offline");
     }
-    return JSON.stringify([
-      caps.targetVaultId,
-      caps.pairingEpoch,
-      caps.readFolders,
-    ]);
+    const scope = toCacheScope(caps);
+    knowledgeNoteMemoryCache.activateScope(this.cachePartition, scope);
+    return scope;
+  }
+
+  async cachedResolution(sourcePath: string, linkpath: string) {
+    const scope = await this.scopeIdentity();
+    return knowledgeNoteMemoryCache.getResolved(
+      this.cachePartition,
+      scope,
+      sourcePath,
+      linkpath,
+    );
+  }
+
+  async cachedNote(path: string, revision?: string) {
+    const scope = await this.scopeIdentity();
+    return knowledgeNoteMemoryCache.getNote(
+      this.cachePartition,
+      scope,
+      path,
+      revision,
+    );
+  }
+
+  async cachedResources(path: string, revision: string) {
+    const scope = await this.scopeIdentity();
+    return knowledgeNoteMemoryCache.getResources(
+      this.cachePartition,
+      scope,
+      path,
+      revision,
+    );
+  }
+
+  invalidatePath(path: string): void {
+    const scope = knowledgeNoteMemoryCache.activeScope(this.cachePartition);
+    if (scope)
+      knowledgeNoteMemoryCache.invalidatePath(this.cachePartition, scope, path);
   }
   close(): void {
     this.closed = true;
@@ -118,16 +195,25 @@ export class NoteQueryClient {
         L.maxRequestBytes,
       );
       check();
-      if (!raw) throw new NoteQueryError("unsupported");
+      if (!raw) throw new NoteQueryError("offline");
       try {
         caps = validateNoteQueryCapabilities(raw);
       } catch {
         throw new NoteQueryError("offline");
       }
-      if (caps.targetVaultId !== this.vaultId)
+      if (caps.targetVaultId !== this.vaultId || !caps.enabled) {
+        knowledgeNoteMemoryCache.clearPartition(this.cachePartition);
         throw new NoteQueryError("forbidden");
-      if (!caps.enabled) throw new NoteQueryError("forbidden");
+      }
       if (!caps.ready) throw new NoteQueryError("indexing");
+      knowledgeNoteMemoryCache.activateScope(
+        this.cachePartition,
+        toCacheScope(caps),
+      );
+      const cacheGeneration = knowledgeNoteMemoryCache.captureGeneration(
+        this.cachePartition,
+      );
+      check();
       if (this.epoch && this.epoch !== caps.pairingEpoch) {
         for (const other of this.pending)
           if (other !== controller) other.abort();
@@ -191,8 +277,69 @@ export class NoteQueryClient {
             !latest.enabled ||
             latest.pairingEpoch !== request.pairingEpoch ||
             latest.targetVaultId !== this.vaultId
+          ) {
+            knowledgeNoteMemoryCache.clearPartition(this.cachePartition);
+            throw new NoteQueryError("stale");
+          }
+          const scope = toCacheScope(latest);
+          knowledgeNoteMemoryCache.activateScope(this.cachePartition, scope);
+          check();
+          if (
+            !knowledgeNoteMemoryCache.isGenerationCurrent(
+              this.cachePartition,
+              cacheGeneration,
+            )
           )
             throw new NoteQueryError("stale");
+          if (response.status === "ok") {
+            const result = response.result as NoteQueryResultMap[K];
+            if (operation === "resolve-link") {
+              const input = safeInput as NoteQueryInputMap["resolve-link"];
+              knowledgeNoteMemoryCache.putResolved(
+                this.cachePartition,
+                scope,
+                input.sourcePath,
+                input.linkpath,
+                result as NoteQueryResultMap["resolve-link"],
+              );
+            } else if (operation === "read-note") {
+              knowledgeNoteMemoryCache.putNote(
+                this.cachePartition,
+                scope,
+                result as NoteQueryResultMap["read-note"],
+              );
+            } else if (operation === "read-note-resource") {
+              const input =
+                safeInput as NoteQueryInputMap["read-note-resource"];
+              const note = knowledgeNoteMemoryCache.getNote(
+                this.cachePartition,
+                scope,
+                input.sourcePath,
+              );
+              if (note)
+                knowledgeNoteMemoryCache.putResource(
+                  this.cachePartition,
+                  scope,
+                  input.sourcePath,
+                  note.revision,
+                  input.linkpath,
+                  result as NoteQueryResultMap["read-note-resource"],
+                );
+            }
+          } else if (
+            operation === "resolve-link" &&
+            response.status === "not-found"
+          ) {
+            const input = safeInput as NoteQueryInputMap["resolve-link"];
+            knowledgeNoteMemoryCache.forgetResolved(
+              this.cachePartition,
+              scope,
+              input.sourcePath,
+              input.linkpath,
+            );
+          } else if (response.status === "forbidden") {
+            knowledgeNoteMemoryCache.clearPartition(this.cachePartition);
+          }
           return response as Extract<NoteQueryResponse, { operation: K }>;
         }
         await delay(
@@ -256,6 +403,7 @@ export function createZoteroNoteQueryClient(): NoteQueryClient {
   if (!queue || !PathUtils.isAbsolute(queue) || !vaultId)
     throw new NoteQueryError("offline");
   const root = PathUtils.join(PathUtils.normalize(queue), "note-query");
+  const cachePartition = JSON.stringify([PathUtils.normalize(queue), vaultId]);
   async function checked(relative: string): Promise<string> {
     if (
       !/^(capabilities\.json|(?:requests|responses)\/[0-9a-f-]{36}\.json)$/.test(
@@ -305,5 +453,16 @@ export function createZoteroNoteQueryClient(): NoteQueryClient {
     },
     vaultId,
     () => new host.AbortController(),
+    cachePartition,
   );
+}
+
+function toCacheScope(
+  caps: ReturnType<typeof validateNoteQueryCapabilities>,
+): NoteQueryCacheScope {
+  return {
+    vaultId: caps.targetVaultId,
+    pairingEpoch: caps.pairingEpoch,
+    readFolders: [...caps.readFolders],
+  };
 }

@@ -1,8 +1,45 @@
 import assert from "node:assert/strict";
 import console from "node:console";
+import { readFile } from "node:fs/promises";
+import { URL } from "node:url";
 import { parseHTML } from "linkedom";
 import { bindNoteLinkNavigation } from "../src/services/note-link-navigation.ts";
+import { createMarkdownRenderer } from "../src/core/markdown-preview.ts";
 import { mount } from "./c0-overlay-probe.js";
+
+const [editorWindowSource, markdownEditorSource, pendingEditorSource] =
+  await Promise.all([
+    readFile(
+      new URL("../src/services/editor-window.ts", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../src/services/markdown-editor.ts", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../src/services/pending-markdown-editor.ts", import.meta.url),
+      "utf8",
+    ),
+  ]);
+assert.match(
+  editorWindowSource,
+  /prepareSurface:\s*bridge\.prepareKnowledgeCardSurface/,
+  "the standalone editor must use the host-provided surface factory",
+);
+assert.doesNotMatch(
+  editorWindowSource,
+  /\bZotero\b|desktopKnowledgeCardsEnabled\(\)|createDesktopKnowledgeCardSurface/,
+  "the standalone editor must not access Zotero globals or instantiate host surfaces directly",
+);
+assert.match(
+  markdownEditorSource,
+  /prepareKnowledgeCardSurface:\s*desktopKnowledgeCardsEnabled\(\)\s*\?\s*\(client, options\)\s*=>\s*createDesktopKnowledgeCardSurface\(client, options\)/s,
+);
+assert.match(
+  pendingEditorSource,
+  /prepareKnowledgeCardSurface:\s*desktopKnowledgeCardsEnabled\(\)\s*\?\s*\(client, options\)\s*=>\s*createDesktopKnowledgeCardSurface\(client, options\)/s,
+);
 
 const { document, window } = parseHTML(
   "<html><body><section id='root'><textarea></textarea><div id='preview'><a href='#' data-zob-note-link='Math/Bayes'>Bayes</a></div><span id='status'></span></section></body></html>",
@@ -71,6 +108,68 @@ assert.equal(status.textContent, previous);
 assert.equal(status.isConnected, false);
 assert.equal(closed, true);
 assert.equal(editor.value, markdown);
+
+const navigationStatus = document.createElement("span");
+root.append(navigationStatus);
+const renderer = createMarkdownRenderer();
+preview.innerHTML = renderer.render("[[Math/Bayes]]");
+const renderedLink = preview.querySelector("a[data-zob-note-link]");
+assert.equal(
+  renderedLink?.getAttribute("data-zob-note-link"),
+  "Math/Bayes",
+  "the editor preview must preserve the internal target on rendered wikilinks",
+);
+renderedLink.innerHTML = "<span>Bayes</span>";
+let finishNavigation;
+const navigationCalls = [];
+const disposePreviewNavigation = bindNoteLinkNavigation({
+  previews: [preview],
+  editor,
+  sourcePath: "Annotations/P02N01.md",
+  markdown: () => editor.value,
+  offset: () => null,
+  status: navigationStatus,
+  locateLocal() {},
+  async onNavigate(target, sourcePath, anchor) {
+    navigationCalls.push({ target, sourcePath, anchor });
+    await new Promise((done) => {
+      finishNavigation = done;
+    });
+  },
+});
+const previewClick = event("click");
+preview.querySelector("span").dispatchEvent(previewClick);
+assert.equal(previewClick.defaultPrevented, true);
+assert.equal(navigationCalls.length, 1);
+assert.equal(navigationCalls[0].target, "Math/Bayes");
+assert.equal(navigationCalls[0].sourcePath, "Annotations/P02N01.md");
+assert.equal(navigationCalls[0].anchor, renderedLink);
+assert.equal(navigationStatus.textContent, "Opening linked note: Math/Bayes");
+finishNavigation();
+await Promise.resolve();
+await Promise.resolve();
+assert.equal(navigationStatus.textContent, "Opened linked note: Math/Bayes");
+disposePreviewNavigation();
+
+renderedLink.setAttribute("data-zob-note-link", "Math/Unavailable");
+const failedNavigationStatus = document.createElement("span");
+root.append(failedNavigationStatus);
+const disposeFailedNavigation = bindNoteLinkNavigation({
+  previews: [preview],
+  editor,
+  sourcePath: "Annotations/P02N01.md",
+  markdown: () => editor.value,
+  offset: () => null,
+  status: failedNavigationStatus,
+  locateLocal() {},
+  async onNavigate() {
+    throw new Error("card surface unavailable");
+  },
+});
+preview.querySelector("span").dispatchEvent(event("click"));
+await Promise.resolve();
+assert.equal(failedNavigationStatus.textContent, "card surface unavailable");
+disposeFailedNavigation();
 
 // DOM-level probe checks are not native Zotero host acceptance.
 window.innerWidth = 1200;

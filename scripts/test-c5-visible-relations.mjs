@@ -1,10 +1,27 @@
 import assert from "node:assert/strict";
 import console from "node:console";
+import { readFile } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { parseHTML } from "linkedom";
 import { resolveVisibleCardRelations } from "../src/core/visible-card-relations.ts";
 import { createKnowledgeNoteCard } from "../src/services/knowledge-note-card.ts";
 import { KnowledgeCardGroupSurface } from "../src/services/knowledge-card-group-surface.ts";
+
+const preferenceMarkup = await readFile(
+  "addon/content/preferences.xhtml",
+  "utf8",
+);
+const preferenceDefaults = await readFile("addon/prefs.js", "utf8");
+assert.match(
+  preferenceMarkup,
+  /id="zotero-prefpane-__addonRef__-inlineKnowledgeCardLines"/,
+);
+assert.match(
+  preferenceMarkup,
+  /id="zotero-prefpane-__addonRef__-desktopKnowledgeCardLines"/,
+);
+assert.match(preferenceDefaults, /pref\("inlineKnowledgeCardLines", true\)/);
+assert.match(preferenceDefaults, /pref\("desktopKnowledgeCardLines", true\)/);
 
 const waitFor = async (predicate) => {
   for (let i = 0; i < 600; i++) {
@@ -92,6 +109,34 @@ window.innerWidth = 1600;
 window.innerHeight = 1000;
 window.AbortController = globalThis.AbortController;
 window.URL = { createObjectURL: () => "blob:test", revokeObjectURL() {} };
+const previousZotero = globalThis.Zotero;
+const preferences = new Map([
+  ["extensions.zotero.zoteroobsidianbridge.inlineKnowledgeCardLines", true],
+  ["extensions.zotero.zoteroobsidianbridge.desktopKnowledgeCardLines", true],
+]);
+const preferenceObservers = new Map();
+let preferenceObserverSequence = 0;
+globalThis.Zotero = {
+  Prefs: {
+    get(name, fallback) {
+      return preferences.has(name) ? preferences.get(name) : fallback;
+    },
+    registerObserver(name, callback, notifyNow) {
+      const id = Symbol(`preference-${++preferenceObserverSequence}`);
+      preferenceObservers.set(id, { name, callback });
+      if (notifyNow) callback();
+      return id;
+    },
+    unregisterObserver(id) {
+      preferenceObservers.delete(id);
+    },
+  },
+};
+const setPreference = (name, value) => {
+  preferences.set(name, value);
+  for (const observer of preferenceObservers.values())
+    if (observer.name === name) observer.callback();
+};
 // Reader hides the native popup shell but explicitly restores visibility on
 // the Bridge child. CSS visibility can be overridden by descendants.
 window.getComputedStyle = (node) => {
@@ -196,6 +241,28 @@ const edgeTitles = () =>
   );
 await group.open("Mathematics/Bayes", "Root.md", rootBayesCanonical);
 await waitFor(() => owner.dataset.relationsState === "ready");
+await waitFor(() => edgeTitles().length === 1);
+assert.equal(edgeTitles().length, 1);
+setPreference(
+  "extensions.zotero.zoteroobsidianbridge.inlineKnowledgeCardLines",
+  false,
+);
+await waitFor(() => edgeTitles().length === 0);
+setPreference(
+  "extensions.zotero.zoteroobsidianbridge.desktopKnowledgeCardLines",
+  false,
+);
+await delay(20);
+assert.equal(
+  edgeTitles().length,
+  0,
+  "changing the desktop-line setting does not turn Reader lines back on",
+);
+setPreference(
+  "extensions.zotero.zoteroobsidianbridge.inlineKnowledgeCardLines",
+  true,
+);
+await waitFor(() => edgeTitles().length === 1);
 assert.equal(cards().length, 1, "automatic discovery must not open Motion");
 assert.equal(reads, 1);
 const rootBayesEdge = () =>
@@ -337,6 +404,106 @@ assert.equal(edgeTitles().length, 0);
 group.dispose();
 await delay(200);
 assert.equal(document.querySelectorAll(".zob-knowledge-layer").length, 0);
+assert.equal(
+  preferenceObservers.size,
+  0,
+  "disposing Reader cards unregisters their line-setting observer",
+);
+
+// Desktop-window cards listen only to their own line-visibility preference.
+setPreference(
+  "extensions.zotero.zoteroobsidianbridge.desktopKnowledgeCardLines",
+  true,
+);
+const desktopOwner = document.createElement("main");
+const desktopRootTitle = document.createElement("header");
+desktopRootTitle.textContent = "Desktop root";
+const desktopPreview = document.createElement("section");
+const desktopBayesLink = document.createElement("a");
+desktopBayesLink.setAttribute("data-zob-note-link", "Bayes");
+desktopBayesLink.textContent = "Bayes";
+desktopPreview.append(desktopBayesLink);
+desktopOwner.append(desktopRootTitle, desktopPreview);
+document.body.append(desktopOwner);
+desktopRootTitle.getBoundingClientRect = () => testRect(20, 20);
+desktopBayesLink.getBoundingClientRect = () => testRect(120, 80);
+const desktopGroup = createKnowledgeNoteCard({
+  owner: desktopOwner,
+  createClient() {
+    return {
+      scope: async () => "desktop-epoch",
+      async query(operation, input) {
+        if (operation === "resolve-link")
+          return {
+            status: "ok",
+            result: {
+              path: "Bayes.md",
+              revision: "desktop-r1",
+              fragment: "",
+              anchorState: "none",
+            },
+          };
+        if (operation === "read-note")
+          return {
+            status: "ok",
+            result: {
+              path: input.path,
+              markdown: "# Bayes",
+              revision: "desktop-r1",
+              readAt: Date.now(),
+              metadata: { valid: true, headings: [], blocks: [] },
+            },
+          };
+        throw new Error(`Unexpected desktop query: ${operation}`);
+      },
+      close() {},
+      cancel() {},
+    };
+  },
+  prepareSurface: async (_client, surfaceOptions) =>
+    new KnowledgeCardGroupSurface(surfaceOptions),
+  vaultPath: "/test-vault",
+  launchURL() {},
+  root: {
+    sourcePath: "DesktopRoot.md",
+    markdown: () => "[[Bayes]]",
+    previews: [desktopPreview],
+    anchor: desktopRootTitle,
+  },
+});
+await desktopGroup.open("Bayes", "DesktopRoot.md", desktopBayesLink);
+await waitFor(() => desktopOwner.dataset.relationsState === "ready");
+const desktopEdgeTitles = () =>
+  [...desktopOwner.querySelectorAll(".zob-knowledge-edge title")].map(
+    (node) => node.textContent,
+  );
+await waitFor(() => desktopEdgeTitles().length === 1);
+assert.equal(desktopEdgeTitles().length, 1);
+setPreference(
+  "extensions.zotero.zoteroobsidianbridge.inlineKnowledgeCardLines",
+  false,
+);
+await delay(20);
+assert.equal(
+  desktopEdgeTitles().length,
+  1,
+  "changing the Reader-line setting does not hide desktop-card lines",
+);
+setPreference(
+  "extensions.zotero.zoteroobsidianbridge.desktopKnowledgeCardLines",
+  false,
+);
+await waitFor(() => desktopEdgeTitles().length === 0);
+setPreference(
+  "extensions.zotero.zoteroobsidianbridge.desktopKnowledgeCardLines",
+  true,
+);
+await waitFor(() => desktopEdgeTitles().length === 1);
+desktopGroup.dispose();
+await delay(50);
+assert.equal(preferenceObservers.size, 0);
+if (previousZotero === undefined) delete globalThis.Zotero;
+else globalThis.Zotero = previousZotero;
 
 // Independent per-edge anchors must not move when another root link is added.
 const surface = new KnowledgeCardGroupSurface({

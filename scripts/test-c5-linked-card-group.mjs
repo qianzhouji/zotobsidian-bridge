@@ -11,7 +11,9 @@ import {
   moveCardRect,
   resizeCardRect,
 } from "../src/core/linked-card-group.ts";
+import { getDesktopWindowRegistration } from "../src/services/desktop-window-registry.ts";
 import { createKnowledgeNoteCard } from "../src/services/knowledge-note-card.ts";
+import { KnowledgeCardGroupSurface } from "../src/services/knowledge-card-group-surface.ts";
 
 const graph = new LinkedCardGraph(4);
 assert.deepEqual(graph.link("A", "A"), {
@@ -85,6 +87,13 @@ function createClient() {
     async scope() {
       return "test-epoch";
     },
+    async scopeIdentity() {
+      return {
+        vaultId: "test-vault",
+        pairingEpoch: "test-epoch",
+        readFolders: ["Zotero Literature"],
+      };
+    },
     async query(operation, input) {
       calls.push({ operation, input });
       if (operation === "resolve-link") {
@@ -145,6 +154,35 @@ const cardFor = (path) =>
   [...document.querySelectorAll(".zob-knowledge-card")].find(
     (panel) => panel.querySelector(".zob-knowledge-title")?.title === path,
   );
+const firstRoot = cardFor("A.md");
+const firstStatus = firstRoot.querySelector(".zob-knowledge-status-details");
+const firstStatusToggle = firstRoot.querySelector(
+  '[data-zob-card-action="toggle-status"]',
+);
+assert.ok(firstStatus && firstStatusToggle);
+assert.equal(firstStatus.hidden, false);
+assert.equal(firstStatusToggle.getAttribute("aria-expanded"), "true");
+const headerControls = [
+  ...firstRoot.querySelector(".zob-knowledge-header").children,
+];
+assert.equal(
+  headerControls.indexOf(firstStatusToggle) + 1,
+  headerControls.indexOf(
+    firstRoot.querySelector('[data-zob-card-action="refresh"]'),
+  ),
+  "the status toggle must sit immediately before refresh in the header",
+);
+await delay(1050);
+assert.equal(
+  firstStatus.hidden,
+  true,
+  "status details collapse after one second",
+);
+assert.equal(firstStatusToggle.getAttribute("aria-expanded"), "false");
+firstStatusToggle.click();
+assert.equal(firstStatus.hidden, false, "the status button expands details");
+firstStatusToggle.click();
+assert.equal(firstStatus.hidden, true, "the status button collapses details");
 const clickLink = async (from, target) => {
   const card = cardFor(from);
   assert.ok(card, `missing card ${from}`);
@@ -163,7 +201,6 @@ const clickLink = async (from, target) => {
   );
 };
 
-const firstRoot = cardFor("A.md");
 await clickLink("A.md", "B");
 await clickLink("B.md", "A");
 await clickLink("A.md", "A");
@@ -195,6 +232,20 @@ assert.equal(
 assert.equal(
   firstRoot.querySelector(".zob-knowledge-body").textContent.includes("Note A"),
   true,
+);
+const registration = getDesktopWindowRegistration(window);
+const firstIdentity = {
+  profileInstanceId: registration.profileInstanceId,
+  ownerWindowId: registration.ownerWindowId,
+  rootSessionId: layerA.dataset.groupId,
+  groupId: layerA.dataset.groupId,
+  vaultId: "test-vault",
+  pairingEpoch: "test-epoch",
+};
+assert.equal(
+  registration.registry.countGroup(firstIdentity),
+  5,
+  "resolved paths replace each pending lease without double counting",
 );
 
 const cardB = cardFor("B.md");
@@ -337,6 +388,14 @@ assert.equal(
   document.querySelectorAll(".zob-knowledge-card").length,
   LINKED_CARD_WINDOW_LIMIT,
 );
+assert.equal(
+  registration.registry.countOwner(
+    registration.profileInstanceId,
+    registration.ownerWindowId,
+  ),
+  LINKED_CARD_WINDOW_LIMIT,
+  "the shared owner registry includes cards from every inline surface",
+);
 await third.open("M1", "ThirdRoot.md");
 assert.equal(
   document.querySelectorAll(".zob-knowledge-card").length,
@@ -356,8 +415,57 @@ assert.equal(
 first.dispose();
 second.dispose();
 third.dispose();
+assert.equal(
+  registration.registry.countOwner(
+    registration.profileInstanceId,
+    registration.ownerWindowId,
+  ),
+  0,
+  "disposing the production surfaces releases all authorization leases",
+);
 assert.equal(document.querySelectorAll(".zob-knowledge-layer").length, 0);
 assert.equal(document.querySelectorAll(".zob-knowledge-card").length, 0);
+let desktopCallbacks;
+const desktopNavigation = createKnowledgeNoteCard({
+  owner: document.getElementById("owner-a"),
+  createClient,
+  vaultPath: "/test-vault",
+  launchURL() {},
+  createSurface(options) {
+    desktopCallbacks = options;
+    return new KnowledgeCardGroupSurface(options);
+  },
+});
+await desktopNavigation.open("A", "Root.md");
+await waitFor(() => cardFor("A.md")?.dataset.state === "ready");
+const originalDesktopSource = cardFor("A.md");
+desktopCallbacks.onCardLink(
+  originalDesktopSource.dataset.cardId,
+  "B",
+  "A.md",
+  0,
+);
+await waitFor(() => cardFor("B.md")?.dataset.state === "ready");
+assert.ok(
+  cardFor("A.md") === originalDesktopSource,
+  "desktop navigation preserves the source card and its identity",
+);
+assert.match(originalDesktopSource.textContent, /Note A/);
+assert.ok(cardFor("B.md") !== originalDesktopSource);
+assert.equal(document.querySelectorAll(".zob-knowledge-card").length, 2);
+cardFor("B.md").querySelector('[aria-label="Close knowledge card"]').click();
+assert.ok(cardFor("A.md") === originalDesktopSource);
+assert.equal(cardFor("B.md"), undefined);
+desktopCallbacks.onCardLink(
+  originalDesktopSource.dataset.cardId,
+  "B",
+  "A.md",
+  0,
+);
+await waitFor(() => cardFor("B.md")?.dataset.state === "ready");
+assert.ok(cardFor("A.md") === originalDesktopSource);
+assert.equal(document.querySelectorAll(".zob-knowledge-card").length, 2);
+desktopNavigation.dispose();
 assert.ok(calls.some((call) => call.input?.linkpath === "D"));
 assert.equal(LINKED_CARD_GROUP_LIMIT, 8);
 assert.equal(LINKED_CARD_WINDOW_LIMIT, 16);

@@ -1,6 +1,10 @@
 import type { AnnotationCardReference } from "./annotation-card.ts";
 import { bindTextareaWikiCompletion } from "./textarea-wiki-completion.ts";
 import { createKnowledgeNoteCard } from "./knowledge-note-card.ts";
+import {
+  createDesktopKnowledgeCardSurface,
+  desktopKnowledgeCardsEnabled,
+} from "./desktop-knowledge-card-surface.ts";
 import { createZoteroNoteQueryClient } from "../adapters/note-query-client.ts";
 import {
   bindNoteLinkNavigation,
@@ -214,6 +218,9 @@ export async function mountPendingReaderCardPopup(
     owner: root,
     controlHost: actions,
     createClient: createZoteroNoteQueryClient,
+    prepareSurface: desktopKnowledgeCardsEnabled()
+      ? createDesktopKnowledgeCardSurface
+      : undefined,
     vaultPath,
     launchURL: (url) => Zotero.launchURL(url),
     root: {

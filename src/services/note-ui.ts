@@ -2,6 +2,7 @@ import {
   X,
   RefreshCw,
   ArrowUpRight,
+  ChevronUp,
   ChevronDown,
   ChevronLeft,
   Layers2,
@@ -39,6 +40,7 @@ export function noteLabels(doc: Document) {
         indexing: "索引准备中",
         stale: "内容已变化，请刷新",
         cached: "缓存，可能过期",
+        cachedWarning: "离线缓存快照 · 内容可能已过期",
         ready: "已读取",
         readonly: "只读",
         close: "关闭知识卡",
@@ -57,6 +59,9 @@ export function noteLabels(doc: Document) {
         collapse: "收起关联知识卡",
         cardLimit: "已达到关联知识卡数量上限",
         resize: "调整知识卡大小",
+        showStatus: "显示卡片状态",
+        hideStatus: "隐藏卡片状态",
+        desktopFallback: "独立窗口不可用，已回退到 Zotero 内嵌卡片",
       }
     : {
         loading: "Loading",
@@ -68,6 +73,7 @@ export function noteLabels(doc: Document) {
         indexing: "Index preparing",
         stale: "Content changed; refresh",
         cached: "Cached; may be outdated",
+        cachedWarning: "Offline cached snapshot · content may be outdated",
         ready: "Ready",
         readonly: "Read only",
         close: "Close knowledge card",
@@ -86,12 +92,23 @@ export function noteLabels(doc: Document) {
         collapse: "Collapse linked knowledge cards",
         cardLimit: "Linked-card limit reached",
         resize: "Resize knowledge card",
+        showStatus: "Show card status",
+        hideStatus: "Hide card status",
+        desktopFallback: "Desktop window unavailable; showing inside Zotero",
       };
 }
 
 export function noteIconButton(
   doc: Document,
-  kind: "close" | "refresh" | "open" | "more" | "back" | "collapse" | "resize",
+  kind:
+    | "close"
+    | "refresh"
+    | "open"
+    | "more"
+    | "back"
+    | "collapse"
+    | "resize"
+    | "status",
   label: string,
 ): HTMLButtonElement {
   const button = noteElement(doc, "button", "zob-note-icon");
@@ -106,6 +123,7 @@ export function noteIconButton(
     back: ChevronLeft,
     collapse: Layers2,
     resize: MoveDiagonal2,
+    status: ChevronUp,
   };
   const svg = doc.createElementNS("http://www.w3.org/2000/svg", "svg");
   for (const [name, value] of Object.entries({
@@ -145,13 +163,17 @@ export function installNoteUIStyles(doc: Document): void {
     .zob-note-icon{display:inline-flex!important;align-items:center;justify-content:center;flex:0 0 28px;width:28px;height:28px;padding:4px!important;border:0!important;border-radius:4px;background:transparent;color:#365f78;cursor:pointer}
     .zob-note-icon:hover{background:#e5f3ff}.zob-note-icon:disabled{opacity:.45;cursor:default}
     .zob-note-icon[hidden]{display:none!important}
+    .zob-note-icon[data-status-expanded=false] svg{transform:rotate(180deg)}
     .zob-note-icon:focus-visible,.zob-completion-row:focus-visible{outline:2px solid #70b5e8;outline-offset:-2px}
     .zob-knowledge-card{position:fixed;z-index:2147483500;width:420px;height:430px;max-width:calc(100vw - 16px);max-height:calc(100vh - 16px);display:flex;flex-direction:column;overflow:hidden}
     .zob-knowledge-layer{position:fixed;inset:0;z-index:2147483601;pointer-events:none;overflow:hidden;contain:layout style}
     .zob-knowledge-edges{position:absolute;inset:0;overflow:visible;pointer-events:none}
-    .zob-knowledge-edge{fill:none;stroke:#78add2;stroke-width:1.5;stroke-dasharray:6 5;vector-effect:non-scaling-stroke}
+    .zob-knowledge-edge{fill:none;stroke:#78add2;stroke-width:1.5;stroke-opacity:.72;stroke-dasharray:6 5;vector-effect:non-scaling-stroke}
     .zob-knowledge-header{display:flex;align-items:center;gap:4px;padding:8px;border-bottom:1px solid #d7e0e6;flex:none;cursor:grab;touch-action:none;user-select:none}
     .zob-knowledge-header:active{cursor:grabbing}
+    .zob-knowledge-status-details[hidden]{display:none!important}
+    .zob-knowledge-cache-warning{flex:none;padding:4px 10px;border-bottom:1px solid #d7e0e6;background:#f2f8fc;color:#526673;font-size:11px}
+    .zob-knowledge-cache-warning[hidden]{display:none!important}
     .zob-knowledge-title{flex:1;min-width:0;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
     .zob-knowledge-body{min-height:0;flex:1;overflow:auto;padding:12px;overflow-wrap:anywhere;background:#fff;color:#20252a;user-select:text}
     .zob-knowledge-body h1{font-size:22px}.zob-knowledge-body h2{font-size:19px}.zob-knowledge-body h3{font-size:16px}
@@ -159,7 +181,7 @@ export function installNoteUIStyles(doc: Document): void {
     .zob-knowledge-body table{border-collapse:collapse;display:block;overflow:auto}.zob-knowledge-body td,.zob-knowledge-body th{border:1px solid #d7e0e6;padding:4px 8px}
     .zob-knowledge-body a{color:#276d9d}.zob-knowledge-body blockquote{border-left:3px solid #9dc9e8;margin-left:0;padding-left:10px}
     .zob-knowledge-body .zob-anchor-target{outline:2px solid #83bae4;background:#edf7ff}
-    .zob-knowledge-body .math-block{overflow-x:auto}.zob-knowledge-body input[type=checkbox]{pointer-events:none}
+    .zob-knowledge-body .math-block{overflow-x:auto}.zob-knowledge-body .katex .katex-mathml{border:0;clip-path:inset(50%);height:1px;overflow:hidden;padding:0;position:absolute;width:1px}.zob-knowledge-body input[type=checkbox]{pointer-events:none}
     .zob-knowledge-card{position:absolute;inset:auto;min-width:0;min-height:0;max-width:none;max-height:none;box-sizing:border-box}
     .zob-knowledge-resize{position:absolute;right:2px;bottom:2px;z-index:2;touch-action:none;cursor:nwse-resize;background:#fff}
     .zob-card-group-message{position:absolute;max-width:min(360px,calc(100vw - 16px));padding:8px 12px;border:1px solid #bed3e2;border-radius:5px;background:#fff;color:#1f252a;box-shadow:0 4px 16px #0003;font:13px/1.4 system-ui;overflow-wrap:anywhere;pointer-events:auto}

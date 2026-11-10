@@ -5,15 +5,23 @@ import {
 import { createMarkdownRenderer } from "../core/markdown-preview.ts";
 import { readVaultImage } from "../adapters/vault-storage.ts";
 import type { AnnotationCardReference } from "./annotation-card.ts";
+import { setMarkdownPreviewResources } from "../core/markdown-preview-resources.ts";
+export {
+  disposeMarkdownPreviewImages,
+  setMarkdownPreviewResources,
+  syncMarkdownPreviewImages,
+} from "../core/markdown-preview-resources.ts";
 
 export interface RenderedCardMarkdown {
   html: string;
+  imageResources?: ReadonlyMap<string, Blob>;
   dispose(): void;
 }
 
 export function setMarkdownPreviewHTML(
   target: HTMLElement,
   html: string,
+  imageResources: ReadonlyMap<string, Blob> = new Map(),
 ): void {
   const document = target.ownerDocument;
   if (!document) throw new Error("Markdown preview target has no document.");
@@ -26,6 +34,7 @@ export function setMarkdownPreviewHTML(
   for (let child = parsed.body.firstChild; child; child = child.nextSibling) {
     fragment.appendChild(document.importNode(child, true));
   }
+  setMarkdownPreviewResources(target, imageResources);
   target.replaceChildren(fragment);
 }
 

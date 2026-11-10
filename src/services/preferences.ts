@@ -52,6 +52,7 @@ import {
   prepareReaderPopupModeChange,
   type ReaderPopupModePreparation,
 } from "../adapters/reader-popup-prototype.ts";
+import { showDesktopOverlayPassthroughProbe } from "../adapters/xul-desktop-edge-overlay.ts";
 
 const preferenceRoot = "extensions.zotero.zoteroobsidianbridge";
 const companionStatusFilename = "bridge-status.json";
@@ -455,6 +456,24 @@ export function bindBridgePreferences(window: Window): void {
   const readerModeStatus = window.document.getElementById(
     "zotero-prefpane-zoteroobsidianbridge-readerModeStatus",
   ) as HTMLElement | null;
+  const desktopKnowledgeCards = window.document.getElementById(
+    "zotero-prefpane-zoteroobsidianbridge-desktopKnowledgeCards",
+  ) as HTMLInputElement | null;
+  const inlineKnowledgeCardLines = window.document.getElementById(
+    "zotero-prefpane-zoteroobsidianbridge-inlineKnowledgeCardLines",
+  ) as HTMLInputElement | null;
+  const desktopKnowledgeCardLines = window.document.getElementById(
+    "zotero-prefpane-zoteroobsidianbridge-desktopKnowledgeCardLines",
+  ) as HTMLInputElement | null;
+  const desktopOverlayProbe = window.document.getElementById(
+    "zotero-prefpane-zoteroobsidianbridge-desktopOverlayProbe",
+  ) as HTMLButtonElement | null;
+  const desktopOverlayProbeStop = window.document.getElementById(
+    "zotero-prefpane-zoteroobsidianbridge-desktopOverlayProbeStop",
+  ) as HTMLButtonElement | null;
+  const desktopOverlayProbeStatus = window.document.getElementById(
+    "zotero-prefpane-zoteroobsidianbridge-desktopOverlayProbeStatus",
+  ) as HTMLElement | null;
   const queuePath = window.document.getElementById(
     "zotero-prefpane-zoteroobsidianbridge-companionQueuePath",
   ) as HTMLInputElement | null;
@@ -526,6 +545,85 @@ export function bindBridgePreferences(window: Window): void {
         readerMode.value === "bridge" ? "bridge" : "native",
       );
     });
+  }
+  if (desktopKnowledgeCards) {
+    desktopKnowledgeCards.checked =
+      Zotero.Prefs.get(`${root}.desktopKnowledgeCards`, true) === true;
+    desktopKnowledgeCards.addEventListener("change", () => {
+      Zotero.Prefs.set(
+        `${root}.desktopKnowledgeCards`,
+        desktopKnowledgeCards.checked,
+        true,
+      );
+    });
+  }
+  for (const [input, preference] of [
+    [inlineKnowledgeCardLines, "inlineKnowledgeCardLines"],
+    [desktopKnowledgeCardLines, "desktopKnowledgeCardLines"],
+  ] as const) {
+    if (!input) continue;
+    input.checked = Zotero.Prefs.get(`${root}.${preference}`, true) !== false;
+    input.addEventListener("change", () => {
+      Zotero.Prefs.set(`${root}.${preference}`, input.checked, true);
+    });
+  }
+  if (
+    desktopOverlayProbe &&
+    desktopOverlayProbeStop &&
+    desktopOverlayProbeStatus
+  ) {
+    let probe:
+      | ReturnType<typeof showDesktopOverlayPassthroughProbe>
+      | undefined;
+    let statusTimer: number | undefined;
+    const stopProbe = (updateStatus: boolean) => {
+      if (statusTimer !== undefined) {
+        window.clearTimeout(statusTimer);
+        statusTimer = undefined;
+      }
+      probe?.stop();
+      probe = undefined;
+      desktopOverlayProbe.disabled = false;
+      desktopOverlayProbeStop.hidden = true;
+      if (updateStatus)
+        desktopOverlayProbeStatus.textContent = getString(
+          "pref-desktop-overlay-probe-stopped",
+        );
+    };
+    desktopOverlayProbe.addEventListener("click", () => {
+      stopProbe(false);
+      try {
+        probe = showDesktopOverlayPassthroughProbe(
+          Zotero.getMainWindow(),
+          20_000,
+        );
+        desktopOverlayProbe.disabled = true;
+        desktopOverlayProbeStop.hidden = false;
+        desktopOverlayProbeStatus.textContent = getString(
+          "pref-desktop-overlay-probe-running",
+        );
+        statusTimer = window.setTimeout(() => {
+          probe = undefined;
+          statusTimer = undefined;
+          desktopOverlayProbe.disabled = false;
+          desktopOverlayProbeStop.hidden = true;
+          desktopOverlayProbeStatus.textContent = getString(
+            "pref-desktop-overlay-probe-stopped",
+          );
+        }, 20_100);
+      } catch (error) {
+        desktopOverlayProbeStatus.textContent = getString(
+          "pref-desktop-overlay-probe-error",
+          {
+            args: {
+              reason: error instanceof Error ? error.message : String(error),
+            },
+          },
+        );
+      }
+    });
+    desktopOverlayProbeStop.addEventListener("click", () => stopProbe(true));
+    window.addEventListener("unload", () => stopProbe(false), { once: true });
   }
   const savedQueuePath = Zotero.Prefs.get(`${root}.companionQueuePath`, true);
   if (queuePath) {

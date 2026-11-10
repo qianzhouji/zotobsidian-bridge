@@ -31,6 +31,8 @@ import {
   startSyncQueue,
   stopSyncQueue,
 } from "./services/sync-queue.ts";
+import { shutdownDesktopEdgeOverlayRuntimes } from "./services/desktop-edge-overlay-runtime.ts";
+import { clearKnowledgeNoteMemoryCache } from "./core/note-query-cache.ts";
 
 let listenersRegistered = false;
 let notifierObserverID: string | null = null;
@@ -41,6 +43,7 @@ let companionRecoveryRunning = false;
 let preferencesPaneID: string | null = null;
 let nativeNoteMenuID: string | null = null;
 let readerModeObserver: symbol | null = null;
+const noteCachePreferenceObservers: symbol[] = [];
 
 function onReaderModePreferenceChanged(): void {
   refreshReaderPopupPrototypes();
@@ -286,6 +289,14 @@ async function onStartup(): Promise<void> {
     onReaderModePreferenceChanged,
     true,
   );
+  for (const preference of ["companionQueuePath", "companionVaultId"])
+    noteCachePreferenceObservers.push(
+      Zotero.Prefs.registerObserver(
+        `extensions.zotero.zoteroobsidianbridge.${preference}`,
+        () => clearKnowledgeNoteMemoryCache(),
+        true,
+      ),
+    );
   listenersRegistered = true;
   addon.data.initialized = true;
 }
@@ -303,6 +314,8 @@ async function onShutdown(): Promise<void> {
     Zotero.Prefs.unregisterObserver(readerModeObserver);
     readerModeObserver = null;
   }
+  for (const observer of noteCachePreferenceObservers.splice(0))
+    Zotero.Prefs.unregisterObserver(observer);
   if (companionResponseTimer !== null) {
     clearInterval(companionResponseTimer);
     companionResponseTimer = null;
@@ -321,6 +334,13 @@ async function onShutdown(): Promise<void> {
     notifierObserverID = null;
   }
   await stopSyncQueue();
+  try {
+    await shutdownDesktopEdgeOverlayRuntimes();
+  } catch (error) {
+    Zotero.debug(
+      `[Zotero Obsidian Bridge] Native overlay shutdown failed: ${String(error)}`,
+    );
+  }
   if (listenersRegistered) {
     try {
       await detachReaderPopupPrototypes();
@@ -351,6 +371,7 @@ async function onShutdown(): Promise<void> {
       `[Zotero Obsidian Bridge] Editor shutdown checkpoint failed: ${String(error)}`,
     );
   }
+  clearKnowledgeNoteMemoryCache();
   addon.data.alive = false;
   // @ts-expect-error Zotero does not declare the add-on's dynamic namespace key.
   delete Zotero[addon.data.config.addonInstance];

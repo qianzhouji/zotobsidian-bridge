@@ -1,9 +1,15 @@
 import type { NoteQueryClient } from "../adapters/note-query-client.ts";
+import { subscribeKnowledgeNoteCacheInvalidation } from "../core/note-query-cache.ts";
 import type { NoteQueryResultMap } from "../core/note-query-protocol.ts";
 import {
   LinkedCardGraph,
   LINKED_CARD_GROUP_LIMIT,
 } from "../core/linked-card-group.ts";
+import type {
+  KnowledgeCardSurface,
+  KnowledgeCardSurfaceFactory,
+  KnowledgeCardSurfaceOptions,
+} from "../core/knowledge-card-surface.ts";
 import {
   knowledgeNoteTitle,
   knowledgeNoteSource,
@@ -61,7 +67,11 @@ interface KnowledgeCardInstance {
   checking: boolean;
   scope: string;
   dispose(): void;
-  load(resolved: Resolved, preserve?: boolean): Promise<void>;
+  load(
+    resolved: Resolved,
+    preserve?: boolean,
+    cachedNote?: SavedNote,
+  ): Promise<void>;
   fail(error: unknown): void;
   assignPath(path: string): void;
   focus(): void;
@@ -84,6 +94,11 @@ export function createKnowledgeNoteCard(options: {
     previews: HTMLElement[];
     anchor: HTMLElement;
   };
+  createSurface?: KnowledgeCardSurfaceFactory;
+  prepareSurface?: (
+    client: NoteQueryClient,
+    options: KnowledgeCardSurfaceOptions,
+  ) => Promise<KnowledgeCardSurface>;
 }) {
   const doc = options.owner.ownerDocument!;
   const win = doc.defaultView!;
@@ -106,17 +121,108 @@ export function createKnowledgeNoteCard(options: {
   let relationSignature = "";
   let relationGeneration = 0;
   let semanticEdges: VisibleCardRelation[] = [];
+  const observedCachePartitions = new Set<string>();
+  const unsubscribeCacheInvalidation: (() => void)[] = [];
+  const observeCachePartition = (client: NoteQueryClient) => {
+    const partition = client.cachePartition;
+    if (!partition || observedCachePartitions.has(partition)) return;
+    observedCachePartitions.add(partition);
+    unsubscribeCacheInvalidation.push(
+      subscribeKnowledgeNoteCacheInvalidation((invalidated) => {
+        if (invalidated === "*" || invalidated === partition) clear();
+      }),
+    );
+  };
+  const relationshipLinesPreference = options.prepareSurface
+    ? "desktopKnowledgeCardLines"
+    : "inlineKnowledgeCardLines";
+  const relationshipLinesEnabled = () => {
+    try {
+      return (
+        typeof Zotero === "undefined" ||
+        Zotero.Prefs.get(
+          `extensions.zotero.zoteroobsidianbridge.${relationshipLinesPreference}`,
+          true,
+        ) !== false
+      );
+    } catch {
+      return true;
+    }
+  };
+  let relationshipLinesObserver: symbol | undefined;
 
-  const surface = new KnowledgeCardGroupSurface({
+  function notifyWindowClosed(key: string): void {
+    const card = cards.get(key);
+    if (card) removeCard(card);
+  }
+
+  const surfaceOptions: KnowledgeCardSurfaceOptions = {
     owner: options.owner,
     controlHost: options.controlHost,
     collapseLabel: labels.collapse,
     limitLabel: labels.cardLimit,
     onCollapse: () => clear(),
-  });
+    onWindowClosed: (key) => notifyWindowClosed?.(key),
+    onCardLink: (key, target, _sourcePath, occurrence) => {
+      const card = cards.get(key);
+      const body = card?.panel.querySelector<HTMLElement>(
+        ".zob-knowledge-body",
+      );
+      if (!card?.active || !body) return;
+      const anchors = [
+        ...body.querySelectorAll<HTMLElement>("a[data-zob-note-link]"),
+      ].filter(
+        (anchor) => anchor.getAttribute("data-zob-note-link") === target,
+      );
+      const anchor = anchors[occurrence];
+      if (options.onNavigate)
+        options.onNavigate(target, card.active.note.path, anchor);
+      else void open(target, card.active.note.path, anchor);
+    },
+    onExternalLink: (url) => options.launchURL(url),
+  };
+  let surface = options.createSurface
+    ? options.createSurface(surfaceOptions)
+    : new KnowledgeCardGroupSurface(surfaceOptions);
+  let surfaceReady: Promise<void> | undefined;
+  let surfaceFailed = false;
+
+  const prepareSurface = (client: NoteQueryClient): Promise<void> => {
+    if (!options.prepareSurface || surfaceFailed) return Promise.resolve();
+    if (!surfaceReady) {
+      surfaceReady = options
+        .prepareSurface(client, surfaceOptions)
+        .then((prepared) => {
+          if (disposed) {
+            prepared.dispose();
+            return;
+          }
+          surface.dispose();
+          surface = prepared;
+        })
+        .catch((error: unknown) => {
+          surfaceReady = undefined;
+          throw error;
+        });
+    }
+    return surfaceReady;
+  };
 
   const aliasKey = (sourcePath: string, target: string) =>
     `${sourcePath}\0${target}`;
+
+  const cachedResolutionForNote = (
+    resolved: Resolved,
+    note: SavedNote,
+  ): Resolved => {
+    if (resolved.revision === note.revision) return resolved;
+    const { anchor: _anchor, ...withoutAnchor } = resolved;
+    return {
+      ...withoutAnchor,
+      revision: note.revision,
+      anchorState: "indexing",
+    };
+  };
 
   const edgeKey = (from: string, to: string) => `${from}\0${to}`;
 
@@ -165,7 +271,7 @@ export function createKnowledgeNoteCard(options: {
 
   const paintRelations = () => {
     if (!options.root) {
-      surface.setEdges(graph.relations());
+      surface.setEdges(relationshipLinesEnabled() ? graph.relations() : []);
       return;
     }
     const sources = snapshots();
@@ -215,8 +321,19 @@ export function createKnowledgeNoteCard(options: {
       }
       surface.setEdgeAnchors(edge.from, edge.to, anchors);
     }
-    surface.setEdges(semanticEdges);
+    surface.setEdges(relationshipLinesEnabled() ? semanticEdges : []);
   };
+
+  if (
+    typeof Zotero !== "undefined" &&
+    typeof Zotero.Prefs.registerObserver === "function"
+  ) {
+    relationshipLinesObserver = Zotero.Prefs.registerObserver(
+      `extensions.zotero.zoteroobsidianbridge.${relationshipLinesPreference}`,
+      () => paintRelations(),
+      true,
+    );
+  }
 
   function refreshRelations(): void {
     if (disposed || !options.root) return;
@@ -243,6 +360,7 @@ export function createKnowledgeNoteCard(options: {
       const controller = new Controller();
       relationController = controller;
       relationClient ??= options.createClient();
+      observeCachePartition(relationClient);
       const client = relationClient;
       void (async () => {
         const scope = await client.scope();
@@ -281,6 +399,9 @@ export function createKnowledgeNoteCard(options: {
         )
           return;
         semanticEdges = result.edges;
+        options.owner.dataset.linkedRelationEdgeCount = String(
+          result.edges.length,
+        );
         options.owner.dataset.relationsState = result.partial
           ? "partial"
           : "ready";
@@ -293,6 +414,7 @@ export function createKnowledgeNoteCard(options: {
         )
           return;
         options.owner.dataset.relationsState = "unavailable";
+        options.owner.dataset.linkedRelationEdgeCount = "error";
         relationSignature = "";
         semanticEdges = [];
         paintRelations();
@@ -373,10 +495,10 @@ export function createKnowledgeNoteCard(options: {
   const createCard = (
     requested: string,
     sourcePath: string,
+    client: NoteQueryClient,
     anchor?: HTMLElement,
   ): KnowledgeCardInstance => {
     const id = `zob-knowledge-${++cardSequence}`;
-    const client = options.createClient();
     const panel = noteElement(doc, "section", "zob-knowledge-card");
     panel.dataset.state = "loading";
     panel.dataset.cardId = id;
@@ -388,18 +510,33 @@ export function createKnowledgeNoteCard(options: {
     const title = noteElement(doc, "strong", "zob-knowledge-title");
     title.textContent = requested;
     title.title = requested;
+    const statusToggle = noteIconButton(doc, "status", labels.hideStatus);
+    statusToggle.dataset.zobCardAction = "toggle-status";
+    statusToggle.dataset.statusExpanded = "true";
+    statusToggle.setAttribute("aria-expanded", "true");
     const refresh = noteIconButton(doc, "refresh", labels.refresh);
     const openButton = noteIconButton(doc, "open", labels.open);
     const close = noteIconButton(doc, "close", labels.close);
-    header.append(title, refresh, openButton, close);
+    refresh.dataset.zobCardAction = "refresh";
+    openButton.dataset.zobCardAction = "open";
+    close.dataset.zobCardAction = "close";
+    header.append(title, statusToggle, refresh, openButton, close);
+    const statusDetails = noteElement(
+      doc,
+      "div",
+      "zob-knowledge-status-details",
+    );
     const pathLabel = noteElement(doc, "div", "zob-note-state");
     const status = noteElement(doc, "div", "zob-note-state");
     status.setAttribute("role", "status");
+    statusDetails.append(pathLabel, status);
+    const cacheWarning = noteElement(doc, "div", "zob-knowledge-cache-warning");
+    cacheWarning.hidden = true;
     const body = noteElement(doc, "div", "zob-knowledge-body");
     body.tabIndex = 0;
     const resize = noteIconButton(doc, "resize", labels.resize);
     resize.classList.add("zob-knowledge-resize");
-    panel.append(header, pathLabel, status, body, resize);
+    panel.append(header, statusDetails, cacheWarning, body, resize);
 
     let controller: AbortController | undefined;
     let rendered: RenderedCardMarkdown | undefined;
@@ -410,10 +547,16 @@ export function createKnowledgeNoteCard(options: {
     let checking = false;
     let scope = "";
     let highlightTimer: number | undefined;
-    const resourceCache = new Map<
-      string,
-      NoteQueryResultMap["read-note-resource"]
-    >();
+    let statusCollapseTimer: number | undefined;
+    let statusManuallyToggled = false;
+    const setStatusExpanded = (expanded: boolean) => {
+      statusDetails.toggleAttribute("hidden", !expanded);
+      statusToggle.dataset.statusExpanded = String(expanded);
+      statusToggle.setAttribute("aria-expanded", String(expanded));
+      const label = expanded ? labels.hideStatus : labels.showStatus;
+      statusToggle.title = label;
+      statusToggle.setAttribute("aria-label", label);
+    };
     const card: KnowledgeCardInstance = {
       id,
       panel,
@@ -434,7 +577,8 @@ export function createKnowledgeNoteCard(options: {
         rendered = undefined;
         body.replaceChildren();
         if (highlightTimer) win.clearTimeout(highlightTimer);
-        resourceCache.clear();
+        if (statusCollapseTimer !== undefined)
+          win.clearTimeout(statusCollapseTimer);
       },
       assignPath(path) {
         card.path = path;
@@ -445,7 +589,7 @@ export function createKnowledgeNoteCard(options: {
       },
       focus() {
         surface.focus(id);
-        panel.focus({ preventScroll: true });
+        if (!panel.closest("[hidden]")) panel.focus({ preventScroll: true });
       },
       fail(error) {
         const code =
@@ -462,6 +606,7 @@ export function createKnowledgeNoteCard(options: {
           setState(code);
           refreshRelations();
         } else if (code === "not-found") {
+          if (active?.note.path) client.invalidatePath(active.note.path);
           active = undefined;
           cached = undefined;
           card.active = undefined;
@@ -486,7 +631,7 @@ export function createKnowledgeNoteCard(options: {
                 : labels.error,
           );
       },
-      async load(resolved, preserve = false) {
+      async load(resolved, preserve = false, offlineNote) {
         controller?.abort();
         const AbortControllerConstructor =
           win.AbortController ?? AbortController;
@@ -499,6 +644,18 @@ export function createKnowledgeNoteCard(options: {
         setState("loading");
         try {
           await checkScope(current, true);
+          if (offlineNote) {
+            await renderCached(
+              {
+                resolved: cachedResolutionForNote(resolved, offlineNote),
+                note: offlineNote,
+              },
+              current,
+              signal,
+              preserve,
+            );
+            return;
+          }
           const noteResponse = await client.query(
             "read-note",
             { path: resolved.path },
@@ -512,10 +669,10 @@ export function createKnowledgeNoteCard(options: {
           const result = await renderKnowledgeMarkdown(
             note.markdown,
             note.path,
-            doc,
+            body.ownerDocument ?? doc,
             client,
             signal,
-            resourceCache,
+            new Map(),
           );
           if (disposed || signal.aborted || current !== generation) {
             result.dispose();
@@ -531,7 +688,7 @@ export function createKnowledgeNoteCard(options: {
           active = { resolved, note };
           cached = active;
           card.active = active;
-          setMarkdownPreviewHTML(body, result.html);
+          setMarkdownPreviewHTML(body, result.html, result.imageResources);
           refreshRelations();
           card.assignPath(note.path);
           title.textContent = knowledgeNoteTitle(note.markdown, note.path);
@@ -577,14 +734,30 @@ export function createKnowledgeNoteCard(options: {
         } catch (error) {
           if (disposed || signal.aborted || current !== generation) return;
           const code = (error as { status?: string })?.status;
-          if (
-            cached &&
-            (code === "offline" || code === "timeout" || code === "busy")
-          ) {
-            await renderCached(cached, current, signal, preserve).catch(
-              card.fail,
-            );
-          } else card.fail(error);
+          if (code === "not-found") client.invalidatePath(resolved.path);
+          if (code === "offline" || code === "timeout" || code === "busy") {
+            let fallback = cached;
+            if (!fallback) {
+              const saved = await client
+                .cachedNote(resolved.path, resolved.revision)
+                .catch(() => undefined);
+              const latest =
+                saved ??
+                (await client.cachedNote(resolved.path).catch(() => undefined));
+              if (latest)
+                fallback = {
+                  resolved: cachedResolutionForNote(resolved, latest),
+                  note: latest,
+                };
+            }
+            if (fallback) {
+              await renderCached(fallback, current, signal, preserve).catch(
+                card.fail,
+              );
+              return;
+            }
+          }
+          card.fail(error);
         } finally {
           if (current === generation) {
             busy = false;
@@ -607,7 +780,7 @@ export function createKnowledgeNoteCard(options: {
           if (disposed || current !== generation) return;
           if (response.status !== "ok") card.fail(response.status);
           else if (response.result.revision !== active.note.revision)
-            setState("stale");
+            void card.load(response.result, true);
           else if (panel.dataset.state === "cached") setState("ready");
         } catch (error) {
           if (disposed || current !== generation) return;
@@ -624,6 +797,13 @@ export function createKnowledgeNoteCard(options: {
 
     function setState(state: CardState, text?: string) {
       panel.dataset.state = state;
+      if (state !== "loading" && state !== "ready" && state !== "cached") {
+        if (statusCollapseTimer !== undefined) {
+          win.clearTimeout(statusCollapseTimer);
+          statusCollapseTimer = undefined;
+        }
+        setStatusExpanded(true);
+      }
       const labelsByState: Record<CardState, string> = {
         loading: labels.loading,
         ready: labels.ready,
@@ -635,8 +815,22 @@ export function createKnowledgeNoteCard(options: {
         error: labels.error,
       };
       status.textContent = text ?? labelsByState[state];
+      cacheWarning.hidden = state !== "cached";
+      if (state === "cached") {
+        const snapshot = active ?? cached;
+        cacheWarning.textContent = snapshot
+          ? `${labels.cachedWarning} · ${new Date(snapshot.note.readAt).toLocaleString()}`
+          : labels.cachedWarning;
+      }
+      if (panel.dataset.desktopWindowFallback === "true")
+        status.textContent += ` · ${labels.desktopFallback}`;
       openButton.disabled = state !== "ready";
     }
+
+    statusCollapseTimer = win.setTimeout(() => {
+      statusCollapseTimer = undefined;
+      if (!statusManuallyToggled) setStatusExpanded(false);
+    }, 1000);
 
     async function checkScope(expected: number, allowChange = false) {
       const next = await client.scope();
@@ -667,13 +861,16 @@ export function createKnowledgeNoteCard(options: {
       signal: AbortSignal,
       preserve: boolean,
     ) {
+      const sharedResources = await client
+        .cachedResources(value.note.path, value.note.revision)
+        .catch(() => new Map());
       const result = await renderKnowledgeMarkdown(
         value.note.markdown,
         value.note.path,
-        doc,
+        body.ownerDocument ?? doc,
         client,
         signal,
-        resourceCache,
+        sharedResources,
         true,
       );
       if (disposed || signal.aborted || current !== generation) {
@@ -683,6 +880,7 @@ export function createKnowledgeNoteCard(options: {
       rendered?.dispose();
       rendered = result;
       active = value;
+      cached = value;
       card.active = value;
       card.assignPath(value.note.path);
       title.textContent = knowledgeNoteTitle(
@@ -690,12 +888,20 @@ export function createKnowledgeNoteCard(options: {
         value.note.path,
       );
       pathLabel.textContent = `${value.note.path} · ${labels.readonly} · ${new Date(value.note.readAt).toLocaleString()}`;
-      setMarkdownPreviewHTML(body, result.html);
+      setMarkdownPreviewHTML(body, result.html, result.imageResources);
       refreshRelations();
       setState("cached");
       if (!preserve) body.scrollTop = 0;
     }
 
+    statusToggle.onclick = () => {
+      statusManuallyToggled = true;
+      if (statusCollapseTimer !== undefined) {
+        win.clearTimeout(statusCollapseTimer);
+        statusCollapseTimer = undefined;
+      }
+      setStatusExpanded(statusDetails.hasAttribute("hidden"));
+    };
     refresh.onclick = () => {
       const alias = [...card.aliases][0];
       if (!alias) return;
@@ -783,14 +989,57 @@ export function createKnowledgeNoteCard(options: {
     preference?: LinkAnchorPreference,
   ) => {
     try {
-      const response = await card.client.query(
-        "resolve-link",
-        { linkpath: target, sourcePath },
-        { channel: `knowledge-resolve:${card.id}` },
-      );
+      let resolved: Resolved;
+      let cachedNote: SavedNote | undefined;
+      let fromCache = false;
+      const cached =
+        typeof card.client.cachedResolution === "function"
+          ? await card.client
+              .cachedResolution(sourcePath, target)
+              .catch(() => undefined)
+          : undefined;
       if (disposed || !cards.has(card.id)) return;
-      if (response.status !== "ok") throw response;
-      const resolved = response.result;
+      if (cached) {
+        resolved = cached.resolved;
+        cachedNote = cached.note;
+        fromCache = true;
+      } else {
+        const response = await card.client.query(
+          "resolve-link",
+          { linkpath: target, sourcePath },
+          { channel: `knowledge-resolve:${card.id}` },
+        );
+        if (disposed || !cards.has(card.id)) return;
+        if (response.status === "ok") resolved = response.result;
+        else if (
+          response.status === "offline" ||
+          response.status === "timeout" ||
+          response.status === "busy"
+        ) {
+          const fallback =
+            typeof card.client.cachedResolution === "function"
+              ? await card.client.cachedResolution(sourcePath, target)
+              : undefined;
+          if (!fallback) throw response;
+          resolved = fallback.resolved;
+          cachedNote = fallback.note;
+          fromCache = true;
+        } else throw response;
+      }
+      if (
+        surface.setAuthorizationScope &&
+        typeof card.client.scopeIdentity === "function"
+      ) {
+        const scope = await card.client.scopeIdentity();
+        if (disposed || !cards.has(card.id)) return;
+        if (
+          surface.setAuthorizationScope({
+            vaultId: scope.vaultId,
+            pairingEpoch: scope.pairingEpoch,
+          }) === false
+        )
+          throw { status: "stale" };
+      }
       const alias = aliasKey(sourcePath, target);
       aliases.set(alias, resolved.path);
       resolvedAliases.set(alias, resolved);
@@ -828,15 +1077,60 @@ export function createKnowledgeNoteCard(options: {
       rememberRoot(sourcePath);
       rememberLink(sourcePath, resolved.path, anchor, preference);
       paths.set(resolved.path, card.id);
-      surface.bindPath(resolved.path, card.id);
+      if (surface.bindPath(resolved.path, card.id) === false) {
+        surface.showLimit(anchor?.getBoundingClientRect());
+        removeCard(card);
+        return;
+      }
       syncEdges();
       card.focus();
-      await card.load(resolved);
+      await surface.whenMounted?.(card.id);
+      if (disposed || !cards.has(card.id)) return;
+      await card.load(resolved, false, cachedNote);
+      if (fromCache && cards.has(card.id))
+        void revalidateCachedCard(card, target, sourcePath, anchor);
     } catch (error) {
       if (disposed || !cards.has(card.id)) return;
       card.fail(error);
     }
   };
+
+  async function revalidateCachedCard(
+    card: KnowledgeCardInstance,
+    target: string,
+    sourcePath: string,
+    anchor?: HTMLElement,
+  ) {
+    if (card.checking || card.busy) return;
+    card.checking = true;
+    const cachedPath = card.path;
+    try {
+      const response = await card.client.query(
+        "resolve-link",
+        { linkpath: target, sourcePath },
+        { channel: `knowledge-revalidate:${card.id}` },
+      );
+      if (disposed || !cards.has(card.id) || !cachedPath) return;
+      if (response.status !== "ok") {
+        if (response.status === "not-found")
+          card.client.invalidatePath(cachedPath);
+        card.fail(response.status);
+        return;
+      }
+      if (response.result.path !== cachedPath) {
+        card.client.invalidatePath(cachedPath);
+        removeCard(card);
+        void open(target, sourcePath, anchor);
+        return;
+      }
+      await card.load(response.result, true);
+    } catch (error) {
+      if (disposed || !cards.has(card.id)) return;
+      card.fail(error);
+    } finally {
+      card.checking = false;
+    }
+  }
 
   async function open(
     link: string,
@@ -874,11 +1168,25 @@ export function createKnowledgeNoteCard(options: {
 
     let card = reuse;
     if (!card) {
+      let client = options.createClient();
+      try {
+        await prepareSurface(client);
+      } catch (error) {
+        client.close();
+        surfaceFailed = true;
+        options.owner.dataset.desktopSurfaceFallback = String(error).slice(
+          0,
+          240,
+        );
+        client = options.createClient();
+      }
+      observeCachePartition(client);
       if (!surface.canAddCard()) {
+        client.close();
         surface.showLimit(anchor?.getBoundingClientRect());
         return;
       }
-      card = createCard(target, sourcePath, anchor);
+      card = createCard(target, sourcePath, client, anchor);
       if (!card.panel.isConnected) return;
       cards.set(card.id, card);
       card.aliases.add(key);
@@ -924,6 +1232,8 @@ export function createKnowledgeNoteCard(options: {
   function clear() {
     relationGeneration++;
     relationController?.abort();
+    relationClient?.close();
+    relationClient = undefined;
     if (relationTimer !== undefined) win.clearTimeout(relationTimer);
     relationTimer = undefined;
     relationSignature = "";
@@ -945,8 +1255,15 @@ export function createKnowledgeNoteCard(options: {
     dispose() {
       if (disposed) return;
       disposed = true;
+      if (relationshipLinesObserver) {
+        Zotero.Prefs.unregisterObserver(relationshipLinesObserver);
+        relationshipLinesObserver = undefined;
+      }
       clear();
       relationClient?.close();
+      for (const unsubscribe of unsubscribeCacheInvalidation.splice(0))
+        unsubscribe();
+      observedCachePartitions.clear();
       surface.dispose();
       if (pollTimer !== undefined) win.clearInterval(pollTimer);
       pollTimer = undefined;

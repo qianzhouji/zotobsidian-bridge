@@ -1,5 +1,10 @@
 import { defineConfig } from "zotero-plugin-scaffold";
 import pkg from "./package.json";
+import {
+  cleanNativeOverlayHelperStage,
+  copyNativeOverlayHelperToPackage,
+  stageNativeOverlayHelper,
+} from "./scripts/build-c5-native-overlay-helper.mjs";
 
 const repository = /^[^/]+\/[^/]+$/.test(process.env.GITHUB_REPOSITORY ?? "")
   ? process.env.GITHUB_REPOSITORY!
@@ -21,6 +26,17 @@ export default defineConfig({
 
   build: {
     assets: ["addon/**/*.*", "LICENSE", "THIRD_PARTY_NOTICES.txt"],
+    hooks: {
+      "build:init": async () => {
+        await stageNativeOverlayHelper();
+      },
+      "build:copyAssets": async (ctx) => {
+        await copyNativeOverlayHelperToPackage(ctx.dist);
+      },
+      "build:done": async () => {
+        await cleanNativeOverlayHelperStage();
+      },
+    },
     define: {
       ...pkg.config,
       author: pkg.author,

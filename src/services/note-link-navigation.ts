@@ -18,7 +18,11 @@ export function bindNoteLinkNavigation(options: {
   status: HTMLElement;
   locateLocal(offset: number): void;
   createClient?: () => NoteQueryClient;
-  onNavigate?(target: string, sourcePath: string, anchor?: HTMLElement): void;
+  onNavigate?(
+    target: string,
+    sourcePath: string,
+    anchor?: HTMLElement,
+  ): void | Promise<void>;
 }): () => void {
   let client: NoteQueryClient | undefined;
   let disposed = false;
@@ -33,7 +37,10 @@ export function bindNoteLinkNavigation(options: {
         return;
       }
       if (options.onNavigate) {
-        options.onNavigate(target, options.sourcePath, anchor);
+        options.status.textContent = `Opening linked note: ${target}`;
+        await options.onNavigate(target, options.sourcePath, anchor);
+        if (!disposed && current === sequence)
+          options.status.textContent = `Opened linked note: ${target}`;
         return;
       }
       client ??= (options.createClient ?? createZoteroNoteQueryClient)();

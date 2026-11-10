@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<?xml-stylesheet href="chrome://global/skin/" type="text/css"?> <?xml-stylesheet
+href="chrome://zoteroobsidianbridge/content/desktop-knowledge-card.css"
+type="text/css"?> <?xml-stylesheet
+href="chrome://zoteroobsidianbridge/content/katex.min.css" type="text/css"?>
+<window
+  xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+  xmlns:html="http://www.w3.org/1999/xhtml"
+  id="zob-desktop-knowledge-card"
+  title="Bridge knowledge card"
+  width="480"
+  height="420"
+  minwidth="320"
+  minheight="240"
+  persist="width height screenX screenY"
+>
+  <script src="chrome://zoteroobsidianbridge/content/scripts/zoteroobsidianbridge-editor.js" />
+  <html:main id="desktop-card-window" data-ready="false" data-mounted="false">
+    <html:div id="card-host"></html:div>
+    <html:div id="window-state" role="status"
+      >Loading knowledge card...</html:div
+    >
+  </html:main>
+</window>

@@ -802,6 +802,7 @@ export async function initializeMarkdownEditor(
     owner: getElement<HTMLElement>(document, "workspace"),
     controlHost: document.querySelector<HTMLElement>(".actions") ?? undefined,
     createClient: () => bridge.createNoteQueryClient(),
+    prepareSurface: bridge.prepareKnowledgeCardSurface,
     vaultPath: reference.vaultPath,
     launchURL: (url) => bridge.launchURL(url),
     root: {

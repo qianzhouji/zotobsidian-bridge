@@ -1,4 +1,13 @@
 import type { CardEdge, CardRect } from "../core/linked-card-group.ts";
+import type {
+  KnowledgeCardSurface,
+  KnowledgeCardSurfaceOptions,
+} from "../core/knowledge-card-surface.ts";
+import type {
+  DesktopCardWindowIdentity,
+  DesktopCardWindowLease,
+} from "../core/desktop-card-window-registry.ts";
+import { getDesktopWindowRegistration } from "./desktop-window-registry.ts";
 import {
   initialCardRect,
   clampCardRect,
@@ -28,13 +37,18 @@ const groupsByDocument = new WeakMap<
 let groupSequence = 0;
 
 /** Owns one isolated set of linked cards and its non-intercepting edge layer. */
-export class KnowledgeCardGroupSurface {
+export class KnowledgeCardGroupSurface implements KnowledgeCardSurface {
   private readonly id = `zob-card-group-${++groupSequence}`;
   private readonly doc: Document;
   private readonly win: Window;
   private readonly owner: HTMLElement;
   private readonly entries = new Map<string, PanelEntry>();
   private readonly pathKeys = new Map<string, string>();
+  private readonly registrations = new Map<string, DesktopCardWindowLease>();
+  private registrationIdentity?: Omit<
+    DesktopCardWindowIdentity,
+    "canonicalPath"
+  >;
   private readonly rootAnchors = new Map<string, HTMLElement>();
   private readonly edgeAnchors = new Map<string, HTMLElement[]>();
   private readonly controls?: HTMLElement;
@@ -56,13 +70,7 @@ export class KnowledgeCardGroupSurface {
     this.scheduleEdges();
   };
 
-  constructor(options: {
-    owner: HTMLElement;
-    controlHost?: HTMLElement;
-    collapseLabel: string;
-    limitLabel: string;
-    onCollapse(): void;
-  }) {
+  constructor(options: KnowledgeCardSurfaceOptions) {
     this.doc = options.owner.ownerDocument!;
     this.win = this.doc.defaultView!;
     this.owner = options.owner;
@@ -102,13 +110,56 @@ export class KnowledgeCardGroupSurface {
   }
 
   canAddCard(): boolean {
-    let windowCount = 0;
-    for (const group of this.groupSet) windowCount += group.cardCount;
+    const count = this.registrationIdentity
+      ? Math.max(
+          this.entries.size,
+          getDesktopWindowRegistration(this.win).registry.countGroup(
+            this.registrationIdentity,
+          ),
+        )
+      : this.entries.size;
+    const ownerCount = this.registrationIdentity
+      ? getDesktopWindowRegistration(this.win).registry.countOwner(
+          this.registrationIdentity.profileInstanceId,
+          this.registrationIdentity.ownerWindowId,
+        )
+      : [...this.groupSet].reduce((total, group) => total + group.cardCount, 0);
     return (
       !this.disposed &&
-      this.entries.size < LINKED_CARD_GROUP_LIMIT &&
-      windowCount < LINKED_CARD_WINDOW_LIMIT
+      count < LINKED_CARD_GROUP_LIMIT &&
+      ownerCount < LINKED_CARD_WINDOW_LIMIT
     );
+  }
+
+  setAuthorizationScope(scope: {
+    vaultId: string;
+    pairingEpoch: string;
+  }): boolean {
+    if (this.disposed) return false;
+    if (this.registrationIdentity) {
+      return (
+        this.registrationIdentity.vaultId === scope.vaultId &&
+        this.registrationIdentity.pairingEpoch === scope.pairingEpoch
+      );
+    }
+    const registration = getDesktopWindowRegistration(this.win);
+    this.registrationIdentity = {
+      profileInstanceId: registration.profileInstanceId,
+      ownerWindowId: registration.ownerWindowId,
+      rootSessionId: this.id,
+      groupId: this.id,
+      vaultId: scope.vaultId,
+      pairingEpoch: scope.pairingEpoch,
+    };
+    for (const key of this.entries.keys()) {
+      if (!this.reserveRegistration(key)) {
+        for (const reservedKey of [...this.registrations.keys()])
+          this.releaseRegistration(reservedKey);
+        this.registrationIdentity = undefined;
+        return false;
+      }
+    }
+    return true;
   }
 
   addPanel(
@@ -119,6 +170,10 @@ export class KnowledgeCardGroupSurface {
     anchor: Pick<DOMRect, "left" | "right" | "top" | "bottom">,
   ): boolean {
     if (!this.canAddCard()) {
+      this.showLimit(anchor);
+      return false;
+    }
+    if (this.registrationIdentity && !this.reserveRegistration(key)) {
       this.showLimit(anchor);
       return false;
     }
@@ -139,13 +194,43 @@ export class KnowledgeCardGroupSurface {
     return true;
   }
 
-  bindPath(path: string, key: string): void {
+  bindPath(path: string, key: string): boolean {
+    const previous = this.pathKeys.get(path);
+    if (previous && previous !== key) return false;
+    if (this.registrationIdentity) {
+      const current = this.registrations.get(key);
+      if (!current) return false;
+      const registry = getDesktopWindowRegistration(this.win).registry;
+      this.releaseRegistration(key);
+      const result = registry.reserve({
+        ...this.registrationIdentity,
+        canonicalPath: path,
+      });
+      if (result.status !== "reserved") return false;
+      this.registrations.set(key, result.lease);
+    }
     this.pathKeys.set(path, key);
     this.scheduleEdges();
+    return true;
+  }
+
+  whenMounted(key: string): Promise<void> {
+    const lease = this.registrations.get(key);
+    if (lease?.state === "opening") {
+      getDesktopWindowRegistration(this.win).registry.transition(
+        lease.id,
+        lease.generation,
+        "ready",
+      );
+      this.registrations.set(key, { ...lease, state: "ready" });
+    }
+    return Promise.resolve();
   }
 
   unbindPath(path: string): void {
+    const key = this.pathKeys.get(path);
     this.pathKeys.delete(path);
+    if (key) this.releaseRegistration(key);
     this.scheduleEdges();
   }
 
@@ -185,6 +270,7 @@ export class KnowledgeCardGroupSurface {
     const entry = this.entries.get(key);
     if (!entry) return;
     this.entries.delete(key);
+    this.releaseRegistration(key);
     entry.panel.remove();
     for (const [path, pathKey] of this.pathKeys)
       if (pathKey === key) this.pathKeys.delete(path);
@@ -251,6 +337,29 @@ export class KnowledgeCardGroupSurface {
 
   private edges: CardEdge[] = [];
 
+  private reserveRegistration(key: string): boolean {
+    if (!this.registrationIdentity) return true;
+    const result = getDesktopWindowRegistration(this.win).registry.reserve({
+      ...this.registrationIdentity,
+      canonicalPath: `pending:${this.id}:${key}`,
+    });
+    if (result.status !== "reserved") return false;
+    this.registrations.set(key, result.lease);
+    return true;
+  }
+
+  private releaseRegistration(key: string): void {
+    const lease = this.registrations.get(key);
+    if (!lease) return;
+    this.registrations.delete(key);
+    const registry = getDesktopWindowRegistration(this.win).registry;
+    const current = registry.get(lease.id);
+    if (!current || current.generation !== lease.generation) return;
+    if (current.state !== "closing")
+      registry.transition(current.id, current.generation, "closing");
+    registry.transition(current.id, current.generation, "closed");
+  }
+
   private ensureLayer(): void {
     if (this.layer) return;
     this.layer = this.doc.createElementNS(
@@ -296,6 +405,7 @@ export class KnowledgeCardGroupSurface {
       );
       arrow.setAttribute("d", "M 0 0 L 10 5 L 0 10 z");
       arrow.setAttribute("fill", "#78add2");
+      arrow.setAttribute("fill-opacity", "0.72");
       marker.append(arrow);
       defs.append(marker);
     }

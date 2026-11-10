@@ -21,6 +21,7 @@ export async function renderKnowledgeMarkdown(
   const renderer = createKnowledgeRenderer();
   const tokens = renderer.parse(knowledgeNoteSource(markdown), {});
   const urls = new Set<string>();
+  const imageResources = new Map<string, Blob>();
   const view = doc.defaultView!;
   const dispose = () => {
     for (const url of urls) view.URL.revokeObjectURL(url);
@@ -93,10 +94,10 @@ export async function renderKnowledgeMarkdown(
             size -= cache.get(oldest)!.base64.length * 2;
             cache.delete(oldest);
           }
-          const url = view.URL.createObjectURL(
-            new view.Blob([data], { type: result.mimeType }),
-          );
+          const blob = new view.Blob([data], { type: result.mimeType });
+          const url = view.URL.createObjectURL(blob);
           urls.add(url);
+          imageResources.set(url, blob);
           child.attrSet("src", url);
         } catch {
           check();
@@ -119,6 +120,7 @@ export async function renderKnowledgeMarkdown(
     renderer.renderer.rules.knowledge_embed = renderImage;
     return {
       html: renderer.renderer.render(tokens, renderer.options, {}),
+      imageResources,
       dispose,
     };
   } catch (error) {

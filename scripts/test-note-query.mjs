@@ -13,6 +13,7 @@ import {
 } from "../obsidian-plugin/src/note-query-service.ts";
 import { verifyColdNavigationCache } from "../obsidian-plugin/src/note-query-metadata.ts";
 import { NoteQueryClient } from "../src/adapters/note-query-client.ts";
+import { clearKnowledgeNoteMemoryCache } from "../src/core/note-query-cache.ts";
 import {
   NOTE_QUERY_CAPABILITIES_TTL,
   validateNoteQueryRequest,
@@ -131,19 +132,22 @@ const service = new NoteQueryService(host, {
   readFolders: [],
 });
 const services = [service];
-const request = (operation, input, overrides = {}) => ({
-  readProtocolVersion: 1,
-  requestId: randomUUID(),
-  targetVaultId: "vault-c",
-  pairingEpoch: service.epoch,
-  clientSessionId: "test",
-  generation: 1,
-  operation,
-  input,
-  issuedAt: Date.now(),
-  expiresAt: Date.now() + L.maxTTL,
-  ...overrides,
-});
+const request = (operation, input, overrides = {}) => {
+  const now = Date.now();
+  return {
+    readProtocolVersion: 1,
+    requestId: randomUUID(),
+    targetVaultId: "vault-c",
+    pairingEpoch: service.epoch,
+    clientSessionId: "test",
+    generation: 1,
+    operation,
+    input,
+    issuedAt: now,
+    expiresAt: now + L.maxTTL,
+    ...overrides,
+  };
+};
 const namespace = path.join(queue, "note-query");
 const transport = {
   async read(relative, max) {
@@ -166,6 +170,7 @@ const transport = {
   },
 };
 const client = new NoteQueryClient(transport, "vault-c");
+const extraClients = [];
 try {
   await fs.mkdir(path.join(vault, "Bench"));
   for (let i = 0; i < 10000; i++) {
@@ -195,6 +200,104 @@ try {
     globalThis.AbortController = HostAbortController;
     sandboxClient.close();
   }
+  const cachePartition = "c6-offline-roundtrip";
+  const cacheClient = new NoteQueryClient(
+    transport,
+    "vault-c",
+    undefined,
+    cachePartition,
+  );
+  extraClients.push(cacheClient);
+  const cachedResolution = await cacheClient.query("resolve-link", {
+    linkpath: "Math/Bayes",
+    sourcePath: "Root.md",
+  });
+  assert.equal(cachedResolution.status, "ok");
+  const cachedNoteResponse = await cacheClient.query("read-note", {
+    path: cachedResolution.result.path,
+  });
+  assert.equal(cachedNoteResponse.status, "ok");
+  const cachedResourceResponse = await cacheClient.query("read-note-resource", {
+    linkpath: "image.png",
+    sourcePath: "Math/Bayes.md",
+  });
+  assert.equal(cachedResourceResponse.status, "ok");
+  const offlineTransport = { ...transport, read: async () => null };
+  const offlineClient = new NoteQueryClient(
+    offlineTransport,
+    "vault-c",
+    undefined,
+    cachePartition,
+  );
+  extraClients.push(offlineClient);
+  await assert.rejects(
+    offlineClient.query("resolve-link", {
+      linkpath: "Math/Bayes",
+      sourcePath: "Root.md",
+    }),
+    (error) => error.status === "offline",
+  );
+  const offlineSnapshot = await offlineClient.cachedResolution(
+    "Root.md",
+    "Math/Bayes",
+  );
+  assert.equal(offlineSnapshot.resolved.path, "Math/Bayes.md");
+  assert.equal(offlineSnapshot.note.markdown, text);
+  assert.equal(
+    (
+      await offlineClient.cachedResources(
+        "Math/Bayes.md",
+        offlineSnapshot.note.revision,
+      )
+    ).get("Math/Bayes.md\0image.png").base64,
+    png.toString("base64"),
+  );
+  const emptyOfflineClient = new NoteQueryClient(
+    offlineTransport,
+    "vault-c",
+    undefined,
+    "c6-empty-offline-partition",
+  );
+  extraClients.push(emptyOfflineClient);
+  await assert.rejects(
+    emptyOfflineClient.cachedResolution("Root.md", "NeverCached"),
+    (error) => error.status === "offline",
+  );
+
+  let releaseDelayedResponse;
+  let signalDelayedResponse;
+  const responseReached = new Promise((resolve) => {
+    signalDelayedResponse = resolve;
+  });
+  const delayedGate = new Promise((resolve) => {
+    releaseDelayedResponse = resolve;
+  });
+  let delayNextResponse = true;
+  const delayedClient = new NoteQueryClient(
+    {
+      ...transport,
+      async read(relative, max) {
+        if (relative.startsWith("responses/") && delayNextResponse) {
+          delayNextResponse = false;
+          signalDelayedResponse();
+          await delayedGate;
+        }
+        return transport.read(relative, max);
+      },
+    },
+    "vault-c",
+    undefined,
+    "c6-late-response-partition",
+  );
+  extraClients.push(delayedClient);
+  const delayedQuery = delayedClient.query("read-note", {
+    path: "Root.md",
+  });
+  await responseReached;
+  clearKnowledgeNoteMemoryCache();
+  releaseDelayedResponse();
+  await assert.rejects(delayedQuery, (error) => error.status === "stale");
+
   const capabilities = service.capabilities();
   assert.equal(
     capabilities.expiresAt - capabilities.updatedAt,
@@ -401,7 +504,7 @@ try {
   );
   await assert.rejects(
     oldClient.query("read-note", { path: "Root.md" }),
-    (error) => error.status === "unsupported",
+    (error) => error.status === "offline",
   );
   oldClient.close();
 
@@ -509,6 +612,7 @@ try {
   );
 } finally {
   client.close();
+  for (const extraClient of extraClients) extraClient.close();
   for (const item of services) await item.stop();
   await fs.rm(root, { recursive: true, force: true });
 }

@@ -31,6 +31,10 @@ import type {
 } from "./markdown-editor.ts";
 import type { EditorWindowOptions } from "./editor-window.ts";
 import { getString } from "../utils/locale.ts";
+import {
+  createDesktopKnowledgeCardSurface,
+  desktopKnowledgeCardsEnabled,
+} from "./desktop-knowledge-card-surface.ts";
 
 export interface PendingMarkdownEditorController {
   readonly window: Window;
@@ -138,6 +142,9 @@ function pendingBridge(
   };
 
   return {
+    prepareKnowledgeCardSurface: desktopKnowledgeCardsEnabled()
+      ? (client, options) => createDesktopKnowledgeCardSurface(client, options)
+      : undefined,
     createNoteQueryClient: createZoteroNoteQueryClient,
     async readCard() {
       const draft = await getDraft();

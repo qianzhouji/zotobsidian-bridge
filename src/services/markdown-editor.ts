@@ -28,11 +28,19 @@ import {
   getCompanionRequestOutcome,
 } from "../adapters/companion-queue.ts";
 import { getString } from "../utils/locale.ts";
+import type {
+  KnowledgeCardSurface,
+  KnowledgeCardSurfaceOptions,
+} from "../core/knowledge-card-surface.ts";
 import { observeWindowClose } from "../adapters/window-close-lifecycle.ts";
 import {
   createZoteroNoteQueryClient,
   type NoteQueryClient,
 } from "../adapters/note-query-client.ts";
+import {
+  createDesktopKnowledgeCardSurface,
+  desktopKnowledgeCardsEnabled,
+} from "./desktop-knowledge-card-surface.ts";
 
 export type EditorSaveResult =
   | { status: "saved" }
@@ -41,6 +49,10 @@ export type EditorSaveResult =
   | { status: "error"; message: string };
 
 export interface MarkdownEditorBridge {
+  prepareKnowledgeCardSurface?(
+    client: NoteQueryClient,
+    options: KnowledgeCardSurfaceOptions,
+  ): Promise<KnowledgeCardSurface>;
   createNoteQueryClient(): NoteQueryClient;
   readCard(): Promise<string | null>;
   readPreviewImage(relativePath: string): Promise<Uint8Array>;
@@ -90,6 +102,9 @@ export function createMarkdownEditorRuntime(
   session: EditorSession;
 } {
   const bridge: MarkdownEditorBridge = {
+    prepareKnowledgeCardSurface: desktopKnowledgeCardsEnabled()
+      ? (client, options) => createDesktopKnowledgeCardSurface(client, options)
+      : undefined,
     createNoteQueryClient: createZoteroNoteQueryClient,
     readCard: () => readVaultFile(reference.vaultPath, reference.relativePath),
     readPreviewImage: (relativePath) =>
